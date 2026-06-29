@@ -5,7 +5,6 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 
 templates = Jinja2Templates(directory="templates")
-templates.env.cache = None
 
 app = FastAPI()
 
