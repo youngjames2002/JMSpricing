@@ -1,0 +1,111 @@
+:root {
+  --paper:     #E9ECEF;
+  --panel:     #FFFFFF;
+  --panel-2:   #F4F6F8;
+  --ink:       #102040;
+  --steel:     #5E6770;
+  --steel-2:   #8A929B;
+  --line:      #CBD1D8;
+  --blue:      #1888F0;
+  --blue-dark: #0F62C0;
+  --sans: "Inter", system-ui, sans-serif;
+  --mono: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+
+body {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper);
+  line-height: 1.45;
+}
+
+header {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 12px 24px;
+}
+
+header h1 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.app {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+
+h2 {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--blue-dark);
+  margin: 32px 0 12px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  margin-bottom: 32px;
+}
+
+th {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--steel);
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--panel-2); }
+
+.home-actions {
+  display: flex;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.home-btn {
+  display: inline-block;
+  padding: 12px 24px;
+  background: var(--blue);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  text-decoration: none;
+  border: none;
+  cursor: pointer;
+}
+
+.home-btn:hover { background: var(--blue-dark); }
+
+.home-btn[disabled] {
+  background: var(--steel-2);
+  cursor: not-allowed;
+}

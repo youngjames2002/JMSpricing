@@ -1,5 +1,62 @@
-<!-- index.html -->
 {% extends "base.html" %}
 {% block content %}
-  <h1>github test</h1>
+
+<h2>Materials</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Code</th>
+      <th>Description</th>
+      <th>Cost / m²</th>
+      <th>Active</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for m in materials %}
+    <tr>
+      <td>{{ m[1] }}</td>
+      <td>{{ m[2] }}</td>
+      <td>£{{ m[3] }}</td>
+      <td>{{ 'Yes' if m[5] else 'No' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Burden Rates</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Laser £/h</th>
+      <th>Tube £/h</th>
+      <th>Fold £/h</th>
+      <th>Weld/Saw £/h</th>
+      <th>Machine £/h</th>
+      <th>Assembly £/h</th>
+      <th>Finish Markup</th>
+      <th>Scrap Factor</th>
+      <th>Mins/Fold</th>
+      <th>Fold Setup</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for br in burden_rates %}
+    <tr>
+      <td>{{ br[1] }}</td>
+      <td>{{ br[2] }}</td>
+      <td>{{ br[3] }}</td>
+      <td>{{ br[4] }}</td>
+      <td>{{ br[5] }}</td>
+      <td>{{ br[6] }}</td>
+      <td>{{ br[7] }}</td>
+      <td>{{ br[8] }}</td>
+      <td>{{ br[9] }}</td>
+      <td>{{ br[10] }}</td>
+      <td>{{ br[11] }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
 {% endblock %}
