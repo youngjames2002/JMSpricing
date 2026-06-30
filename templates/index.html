@@ -1,62 +1,273 @@
 {% extends "base.html" %}
+{% block header_nav %}<a href="/" class="back-link">&#8592; Home</a>{% endblock %}
 {% block content %}
 
-<h2>Materials</h2>
-<table>
-  <thead>
-    <tr>
-      <th>Code</th>
-      <th>Description</th>
-      <th>Cost / m²</th>
-      <th>Active</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for m in materials %}
-    <tr>
-      <td>{{ m[1] }}</td>
-      <td>{{ m[2] }}</td>
-      <td>£{{ m[3] }}</td>
-      <td>{{ 'Yes' if m[5] else 'No' }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+{%- macro p(v) -%}{{ '£%.2f' % v if v is not none else '—' }}{%- endmacro -%}
 
-<h2>Burden Rates</h2>
-<table>
-  <thead>
-    <tr>
-      <th>Name</th>
-      <th>Laser £/h</th>
-      <th>Tube £/h</th>
-      <th>Fold £/h</th>
-      <th>Weld/Saw £/h</th>
-      <th>Machine £/h</th>
-      <th>Assembly £/h</th>
-      <th>Finish Markup</th>
-      <th>Scrap Factor</th>
-      <th>Mins/Fold</th>
-      <th>Fold Setup</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for br in burden_rates %}
-    <tr>
-      <td>{{ br[1] }}</td>
-      <td>{{ br[2] }}</td>
-      <td>{{ br[3] }}</td>
-      <td>{{ br[4] }}</td>
-      <td>{{ br[5] }}</td>
-      <td>{{ br[6] }}</td>
-      <td>{{ br[7] }}</td>
-      <td>{{ br[8] }}</td>
-      <td>{{ br[9] }}</td>
-      <td>{{ br[10] }}</td>
-      <td>{{ br[11] }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<!-- ── Materials ─────────────────────────────────────────── -->
+
+<div class="section-header">
+  <h2>Materials</h2>
+  <button class="btn-add" onclick="addMaterialSet()">+ Add Price Set</button>
+</div>
+
+<div class="mat-cards" id="mat-cards">
+  {% for m in materials %}
+  <div class="rate-card mat-card {% if m['is_active'] %}rate-card-selected{% endif %}">
+    <div class="rate-card-header">
+      <div class="rate-card-title">{{ m['name'] }}</div>
+      {% if m['is_active'] %}
+        <span class="rc-badge">In Use</span>
+      {% else %}
+        <button class="btn-use" onclick="selectMaterial({{ m['id'] }})">Use This</button>
+      {% endif %}
+    </div>
+    <div class="mat-groups">
+      <div class="mat-group">
+        <div class="mat-group-title">CR4</div>
+        <div class="rate-card-row"><span class="rcl">1.5mm</span><span class="rcv">{{ p(m['cr4_1_5']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">2.0mm</span><span class="rcv">{{ p(m['cr4_2_0']) }}</span></div>
+      </div>
+      <div class="mat-group">
+        <div class="mat-group-title">S275</div>
+        <div class="rate-card-row"><span class="rcl">3.0mm</span><span class="rcv">{{ p(m['s275_3_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">4.0mm</span><span class="rcv">{{ p(m['s275_4_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">5.0mm</span><span class="rcv">{{ p(m['s275_5_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">6.0mm</span><span class="rcv">{{ p(m['s275_6_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">8.0mm</span><span class="rcv">{{ p(m['s275_8_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">10.0mm</span><span class="rcv">{{ p(m['s275_10_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">12.0mm</span><span class="rcv">{{ p(m['s275_12_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">15.0mm</span><span class="rcv">{{ p(m['s275_15_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">20.0mm</span><span class="rcv">{{ p(m['s275_20_0']) }}</span></div>
+      </div>
+      <div class="mat-group">
+        <div class="mat-group-title">S355</div>
+        <div class="rate-card-row"><span class="rcl">3.0mm</span><span class="rcv">{{ p(m['s355_3_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">4.0mm</span><span class="rcv">{{ p(m['s355_4_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">5.0mm</span><span class="rcv">{{ p(m['s355_5_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">6.0mm</span><span class="rcv">{{ p(m['s355_6_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">8.0mm</span><span class="rcv">{{ p(m['s355_8_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">10.0mm</span><span class="rcv">{{ p(m['s355_10_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">12.0mm</span><span class="rcv">{{ p(m['s355_12_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">15.0mm</span><span class="rcv">{{ p(m['s355_15_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">20.0mm</span><span class="rcv">{{ p(m['s355_20_0']) }}</span></div>
+      </div>
+      <div class="mat-group">
+        <div class="mat-group-title">Hardox 450</div>
+        <div class="rate-card-row"><span class="rcl">4.0mm</span><span class="rcv">{{ p(m['hardox450_4_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">5.0mm</span><span class="rcv">{{ p(m['hardox450_5_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">6.0mm</span><span class="rcv">{{ p(m['hardox450_6_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">8.0mm</span><span class="rcv">{{ p(m['hardox450_8_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">10.0mm</span><span class="rcv">{{ p(m['hardox450_10_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">12.0mm</span><span class="rcv">{{ p(m['hardox450_12_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">15.0mm</span><span class="rcv">{{ p(m['hardox450_15_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">20.0mm</span><span class="rcv">{{ p(m['hardox450_20_0']) }}</span></div>
+      </div>
+      <div class="mat-group">
+        <div class="mat-group-title">304DP1</div>
+        <div class="rate-card-row"><span class="rcl">0.9mm</span><span class="rcv">{{ p(m['ss304dp1_0_9']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">1.5mm</span><span class="rcv">{{ p(m['ss304dp1_1_5']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">2.0mm</span><span class="rcv">{{ p(m['ss304dp1_2_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">3.0mm</span><span class="rcv">{{ p(m['ss304dp1_3_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">4.0mm</span><span class="rcv">{{ p(m['ss304dp1_4_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">5.0mm</span><span class="rcv">{{ p(m['ss304dp1_5_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">6.0mm</span><span class="rcv">{{ p(m['ss304dp1_6_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">8.0mm</span><span class="rcv">{{ p(m['ss304dp1_8_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">10.0mm</span><span class="rcv">{{ p(m['ss304dp1_10_0']) }}</span></div>
+      </div>
+      <div class="mat-group">
+        <div class="mat-group-title">5251 Al</div>
+        <div class="rate-card-row"><span class="rcl">1.0mm</span><span class="rcv">{{ p(m['al5251_1_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">2.0mm</span><span class="rcv">{{ p(m['al5251_2_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">3.0mm</span><span class="rcv">{{ p(m['al5251_3_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">4.0mm</span><span class="rcv">{{ p(m['al5251_4_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">5.0mm</span><span class="rcv">{{ p(m['al5251_5_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">6.0mm</span><span class="rcv">{{ p(m['al5251_6_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">8.0mm</span><span class="rcv">{{ p(m['al5251_8_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">10.0mm</span><span class="rcv">{{ p(m['al5251_10_0']) }}</span></div>
+      </div>
+      <div class="mat-group">
+        <div class="mat-group-title">Galv</div>
+        <div class="rate-card-row"><span class="rcl">1.0mm</span><span class="rcv">{{ p(m['galv_1_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">1.5mm</span><span class="rcv">{{ p(m['galv_1_5']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">2.0mm</span><span class="rcv">{{ p(m['galv_2_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">2.5mm</span><span class="rcv">{{ p(m['galv_2_5']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">3.0mm</span><span class="rcv">{{ p(m['galv_3_0']) }}</span></div>
+      </div>
+      <div class="mat-group">
+        <div class="mat-group-title">A1050</div>
+        <div class="rate-card-row"><span class="rcl">1.0mm</span><span class="rcv">{{ p(m['a1050_1_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">1.5mm</span><span class="rcv">{{ p(m['a1050_1_5']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">2.0mm</span><span class="rcv">{{ p(m['a1050_2_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">3.0mm</span><span class="rcv">{{ p(m['a1050_3_0']) }}</span></div>
+        <div class="rate-card-row"><span class="rcl">4.0mm</span><span class="rcv">{{ p(m['a1050_4_0']) }}</span></div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- ── Burden Rates ───────────────────────────────────────── -->
+
+<div class="section-header">
+  <h2>Burden Rates</h2>
+  <button class="btn-add" onclick="addBurdenRate()">+ Add Rate Set</button>
+</div>
+
+<div class="rate-cards" id="rate-cards">
+  {% for br in burden_rates %}
+  <div class="rate-card {% if br['is_active'] %}rate-card-selected{% endif %}">
+    <div class="rate-card-header">
+      <div class="rate-card-title">{{ br['name'] }}</div>
+      {% if br['is_active'] %}
+        <span class="rc-badge">In Use</span>
+      {% else %}
+        <button class="btn-use" onclick="selectRate({{ br['id'] }})">Use This</button>
+      {% endif %}
+    </div>
+    <div class="rate-card-rows">
+      <div class="rate-card-row"><span class="rcl">Laser</span><span class="rcv">£{{ br['laser_hourly_rate'] }}/h</span></div>
+      <div class="rate-card-row"><span class="rcl">Tube</span><span class="rcv">£{{ br['tube_hourly_rate'] }}/h</span></div>
+      <div class="rate-card-row"><span class="rcl">Fold</span><span class="rcv">£{{ br['fold_rate'] }}/h</span></div>
+      <div class="rate-card-row"><span class="rcl">Weld/Saw</span><span class="rcv">£{{ br['weld_saw_rate'] }}/h</span></div>
+      <div class="rate-card-row"><span class="rcl">Machine</span><span class="rcv">£{{ br['machine_rate'] }}/h</span></div>
+      <div class="rate-card-row"><span class="rcl">Assembly</span><span class="rcv">£{{ br['assembly_rate'] }}/h</span></div>
+      <div class="rate-card-row"><span class="rcl">Fin. Markup</span><span class="rcv">{{ br['finishing_markup'] }}</span></div>
+      <div class="rate-card-row"><span class="rcl">Scrap Factor</span><span class="rcv">{{ br['scrap_factor'] }}</span></div>
+      <div class="rate-card-row"><span class="rcl">Mins/Fold</span><span class="rcv">{{ br['mins_per_fold'] }}</span></div>
+      <div class="rate-card-row"><span class="rcl">Fold Setup</span><span class="rcv">{{ br['fold_setup_mins'] }} min</span></div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<script>
+const MATERIAL_GROUPS = [
+  { label: 'CR4',       fields: [['1.5mm','cr4_1_5'],['2.0mm','cr4_2_0']] },
+  { label: 'S275',      fields: [['3.0mm','s275_3_0'],['4.0mm','s275_4_0'],['5.0mm','s275_5_0'],['6.0mm','s275_6_0'],['8.0mm','s275_8_0'],['10.0mm','s275_10_0'],['12.0mm','s275_12_0'],['15.0mm','s275_15_0'],['20.0mm','s275_20_0']] },
+  { label: 'S355',      fields: [['3.0mm','s355_3_0'],['4.0mm','s355_4_0'],['5.0mm','s355_5_0'],['6.0mm','s355_6_0'],['8.0mm','s355_8_0'],['10.0mm','s355_10_0'],['12.0mm','s355_12_0'],['15.0mm','s355_15_0'],['20.0mm','s355_20_0']] },
+  { label: 'Hardox 450',fields: [['4.0mm','hardox450_4_0'],['5.0mm','hardox450_5_0'],['6.0mm','hardox450_6_0'],['8.0mm','hardox450_8_0'],['10.0mm','hardox450_10_0'],['12.0mm','hardox450_12_0'],['15.0mm','hardox450_15_0'],['20.0mm','hardox450_20_0']] },
+  { label: '304DP1',    fields: [['0.9mm','ss304dp1_0_9'],['1.5mm','ss304dp1_1_5'],['2.0mm','ss304dp1_2_0'],['3.0mm','ss304dp1_3_0'],['4.0mm','ss304dp1_4_0'],['5.0mm','ss304dp1_5_0'],['6.0mm','ss304dp1_6_0'],['8.0mm','ss304dp1_8_0'],['10.0mm','ss304dp1_10_0']] },
+  { label: '5251 Al',   fields: [['1.0mm','al5251_1_0'],['2.0mm','al5251_2_0'],['3.0mm','al5251_3_0'],['4.0mm','al5251_4_0'],['5.0mm','al5251_5_0'],['6.0mm','al5251_6_0'],['8.0mm','al5251_8_0'],['10.0mm','al5251_10_0']] },
+  { label: 'Galv',      fields: [['1.0mm','galv_1_0'],['1.5mm','galv_1_5'],['2.0mm','galv_2_0'],['2.5mm','galv_2_5'],['3.0mm','galv_3_0']] },
+  { label: 'A1050',     fields: [['1.0mm','a1050_1_0'],['1.5mm','a1050_1_5'],['2.0mm','a1050_2_0'],['3.0mm','a1050_3_0'],['4.0mm','a1050_4_0']] },
+];
+
+// ── Materials ──────────────────────────────────────────────
+
+async function selectMaterial(id) {
+  const r = await fetch('/materials/' + id + '/select', { method: 'POST' });
+  if (r.ok) location.reload(); else alert('Failed to update selection');
+}
+
+function addMaterialSet() {
+  if (document.getElementById('mat-new-card')) return;
+  const card = document.createElement('div');
+  card.className = 'rate-card mat-card mat-card-form';
+  card.id = 'mat-new-card';
+  const groupsHtml = MATERIAL_GROUPS.map(g =>
+    '<div class="mat-group">' +
+    '<div class="mat-group-title">' + esc(g.label) + '</div>' +
+    g.fields.map(([label, key]) =>
+      '<div class="rate-card-row"><span class="rcl">' + label + '</span>' +
+      '<input class="rc-row-input" type="number" step="0.01" id="mn-' + key + '" placeholder="—"></div>'
+    ).join('') +
+    '</div>'
+  ).join('');
+  card.innerHTML =
+    '<input class="rc-name-input" id="mn-name" placeholder="Price Set Name (e.g. June 2026)">' +
+    '<div class="mat-groups">' + groupsHtml + '</div>' +
+    '<div class="rc-actions">' +
+      '<button class="btn-save" onclick="saveNewMaterialSet()">Save</button> ' +
+      '<button class="btn-cancel" onclick="document.getElementById(\'mat-new-card\').remove()">Cancel</button>' +
+    '</div>';
+  document.getElementById('mat-cards').appendChild(card);
+  document.getElementById('mn-name').focus();
+}
+
+async function saveNewMaterialSet() {
+  const body = { name: document.getElementById('mn-name').value.trim() };
+  MATERIAL_GROUPS.forEach(g => g.fields.forEach(([, key]) => {
+    const el = document.getElementById('mn-' + key);
+    body[key] = el && el.value !== '' ? parseFloat(el.value) : null;
+  }));
+  if (!body.name) { alert('Name is required'); return; }
+  const r = await fetch('/materials', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (r.ok) location.reload(); else alert('Save failed');
+}
+
+// ── Burden Rates ───────────────────────────────────────────
+
+async function selectRate(id) {
+  const r = await fetch('/rates/' + id + '/select', { method: 'POST' });
+  if (r.ok) location.reload(); else alert('Failed to update selection');
+}
+
+function addBurdenRate() {
+  if (document.getElementById('rate-new-card')) return;
+  const card = document.createElement('div');
+  card.className = 'rate-card rate-card-form';
+  card.id = 'rate-new-card';
+  card.innerHTML =
+    '<input class="rc-name-input" id="rn-name" placeholder="Rate Set Name">' +
+    '<div class="rate-card-rows">' +
+      rcInput('Laser £/h',    'rn-laser')    +
+      rcInput('Tube £/h',     'rn-tube')     +
+      rcInput('Fold £/h',     'rn-fold')     +
+      rcInput('Weld/Saw £/h', 'rn-weld')     +
+      rcInput('Machine £/h',  'rn-machine')  +
+      rcInput('Assembly £/h', 'rn-assembly') +
+      rcInput('Fin. Markup',  'rn-finishing')+
+      rcInput('Scrap Factor', 'rn-scrap')    +
+      rcInput('Mins/Fold',    'rn-minsperfd')+
+      rcInput('Fold Setup',   'rn-foldsetup')+
+    '</div>' +
+    '<div class="rc-actions">' +
+      '<button class="btn-save" onclick="saveNewBurdenRate()">Save</button> ' +
+      '<button class="btn-cancel" onclick="document.getElementById(\'rate-new-card\').remove()">Cancel</button>' +
+    '</div>';
+  document.getElementById('rate-cards').appendChild(card);
+  document.getElementById('rn-name').focus();
+}
+
+async function saveNewBurdenRate() {
+  const flt = id => parseFloat(document.getElementById(id).value) || 0;
+  const body = {
+    name:               document.getElementById('rn-name').value.trim(),
+    laser_hourly_rate:  flt('rn-laser'),
+    tube_hourly_rate:   flt('rn-tube'),
+    fold_rate:          flt('rn-fold'),
+    weld_saw_rate:      flt('rn-weld'),
+    machine_rate:       flt('rn-machine'),
+    assembly_rate:      flt('rn-assembly'),
+    finishing_markup:   flt('rn-finishing'),
+    scrap_factor:       flt('rn-scrap'),
+    mins_per_fold:      flt('rn-minsperfd'),
+    fold_setup_mins:    flt('rn-foldsetup'),
+  };
+  if (!body.name) { alert('Name is required'); return; }
+  const r = await fetch('/rates', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (r.ok) location.reload(); else alert('Save failed');
+}
+
+function rcInput(label, id) {
+  return '<div class="rate-card-row">' +
+    '<span class="rcl">' + esc(label) + '</span>' +
+    '<input class="rc-row-input" type="number" step="0.01" id="' + id + '" value="0">' +
+    '</div>';
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
 
 {% endblock %}

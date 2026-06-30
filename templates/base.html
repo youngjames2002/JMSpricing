@@ -10,12 +10,13 @@
 <body>
     <header>
         <h1>JMS Automated Pricing System</h1>
+        {% block header_nav %}{% endblock %}
     </header>
     <main class="app">
         {% block content %}
         <div class="home-actions">
+            <a href="/rates" class="home-btn">Material Costs and Burden Rates</a>
             <button class="home-btn" disabled>Price New Order</button>
-            <a href="/rates" class="home-btn">View Material &amp; Burden Rates</a>
         </div>
         {% endblock %}
     </main>

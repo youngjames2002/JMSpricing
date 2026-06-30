@@ -29,6 +29,17 @@ header {
   padding: 12px 24px;
 }
 
+.back-link {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--steel);
+  text-decoration: none;
+  margin-left: 20px;
+}
+.back-link:hover { color: var(--blue); }
+
 header h1 {
   margin: 0;
   font-family: var(--mono);
@@ -40,7 +51,7 @@ header h1 {
 }
 
 .app {
-  max-width: 1180px;
+  max-width: 1600px;
   margin: 0 auto;
   padding: 32px 24px;
 }
@@ -86,26 +97,260 @@ tbody tr:hover { background: var(--panel-2); }
 .home-actions {
   display: flex;
   gap: 16px;
-  margin-top: 16px;
+  max-width: 600px;
+  margin: 72px auto 0;
 }
 
 .home-btn {
-  display: inline-block;
-  padding: 12px 24px;
-  background: var(--blue);
-  color: #fff;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  padding: 32px 24px;
   font-family: var(--mono);
-  font-size: 12px;
-  letter-spacing: .1em;
+  font-size: 11px;
+  letter-spacing: .14em;
   text-transform: uppercase;
+  text-align: center;
+  line-height: 1.9;
   text-decoration: none;
-  border: none;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--ink);
   cursor: pointer;
 }
 
-.home-btn:hover { background: var(--blue-dark); }
+.home-btn:not([disabled]):hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
 
 .home-btn[disabled] {
-  background: var(--steel-2);
+  color: var(--steel-2);
+  background: var(--panel-2);
   cursor: not-allowed;
+}
+
+/* ── Rates page layout ──────────────────────────────────── */
+
+.rates-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) 1fr;
+  gap: 40px;
+  align-items: start;
+}
+
+.col { min-width: 0; }
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.section-header h2 { margin: 0; }
+
+/* ── Buttons ────────────────────────────────────────────── */
+
+.btn-add {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--blue);
+  background: none;
+  border: 1px solid var(--blue);
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-add:hover { background: var(--blue); color: #fff; }
+
+.btn-edit, .btn-save, .btn-cancel {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  border: none;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.btn-edit   { color: var(--steel); background: var(--panel-2); border: 1px solid var(--line); }
+.btn-save   { color: #fff; background: var(--blue); }
+.btn-save:hover { background: var(--blue-dark); }
+.btn-cancel { color: var(--steel); background: var(--panel-2); border: 1px solid var(--line); }
+
+/* ── Inline table editing ───────────────────────────────── */
+
+.row-actions { width: 1%; white-space: nowrap; }
+
+.cell-input {
+  font-family: var(--mono);
+  font-size: 12px;
+  border: 1px solid var(--blue);
+  padding: 3px 6px;
+  background: var(--panel);
+  color: var(--ink);
+  width: 100%;
+}
+.cell-input.num  { width: 90px; }
+.cell-input.wide { min-width: 140px; }
+.cell-input:focus { outline: none; }
+
+/* ── Burden rate cards ──────────────────────────────────── */
+
+.rate-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px;
+}
+
+.rate-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 14px 16px;
+}
+
+.rate-card-selected {
+  border-color: var(--blue);
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+
+.rate-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.rate-card-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink);
+  margin: 0;
+}
+
+.rc-badge {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: #fff;
+  background: var(--blue);
+  padding: 2px 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.btn-use {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--steel);
+  background: none;
+  border: 1px solid var(--line);
+  padding: 2px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.btn-use:hover { border-color: var(--blue); color: var(--blue); }
+
+.rate-card-rows { display: grid; gap: 5px; }
+
+.rate-card-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.rcl {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--steel-2);
+  white-space: nowrap;
+}
+
+.rcv {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+/* ── Material cards ─────────────────────────────────────── */
+
+.mat-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-bottom: 32px;
+}
+
+.mat-card .mat-groups {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px 20px;
+}
+
+.mat-group-title {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--steel);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 6px;
+}
+
+/* ── Rate card add form ─────────────────────────────────── */
+
+.rc-name-input {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--blue);
+  background: none;
+  color: var(--ink);
+  padding: 2px 0;
+  margin-bottom: 12px;
+  outline: none;
+}
+.rc-name-input::placeholder { color: var(--steel-2); }
+
+.rc-row-input {
+  font-family: var(--mono);
+  font-size: 11px;
+  width: 72px;
+  border: 1px solid var(--line);
+  padding: 2px 5px;
+  background: var(--panel-2);
+  color: var(--ink);
+  text-align: right;
+}
+.rc-row-input:focus { outline: none; border-color: var(--blue); }
+
+.rc-actions {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 6px;
 }
