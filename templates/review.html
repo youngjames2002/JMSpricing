@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+
+{% block header_nav %}
+<a href="/price/{{ nest_id }}/{{ parts | length }}" class="back-link">← Pricing</a>
+{% endblock %}
+
+{% block content %}
+<div class="review-page">
+
+  <p class="eyebrow">Quote Review</p>
+  <h1 class="review-title">All Parts</h1>
+  <p class="review-subtext">Click any row to jump back and adjust pricing. Incomplete parts are missing a material cost.</p>
+
+  <table id="review-table">
+    <thead>
+      <tr>
+        <th>Part No</th>
+        <th>Description</th>
+        <th>Material</th>
+        <th style="text-align:right">Qty</th>
+        <th style="text-align:right">Cost / Part</th>
+        <th style="text-align:right">Line Cost</th>
+        <th style="text-align:right">With Margin</th>
+        <th style="text-align:center">Status</th>
+      </tr>
+    </thead>
+    <tbody id="review-body">
+      <!-- Populated by JS -->
+    </tbody>
+  </table>
+
+  <div id="review-totals"></div>
+
+  <div class="review-actions">
+    <a href="/price/{{ nest_id }}/1" class="btn-back">← Back to pricing</a>
+    <button class="btn-generate" id="btn-generate">Generate quote →</button>
+  </div>
+
+</div>
+
+<script>
+const NEST_ID = {{ nest_id }};
+const PARTS   = {{ parts | tojson }};
+
+function loadAll() {
+  return PARTS.map((p, i) => {
+    try {
+      const raw = sessionStorage.getItem('quote_' + NEST_ID + '_' + (i + 1));
+      return raw ? { ...p, ...JSON.parse(raw) } : { ...p, complete: false };
+    } catch { return { ...p, complete: false }; }
+  });
+}
+
+function fmt(n) { return (n != null && !isNaN(n)) ? '£' + n.toFixed(2) : '—'; }
+
+function render() {
+  const all   = loadAll();
+  const tbody = document.getElementById('review-body');
+  let totCost = 0, totMargin = 0;
+
+  tbody.innerHTML = all.map((p, i) => {
+    const cpp  = p.cost_per_part;
+    const tot  = p.total_cost;
+    const marg = p.margin_total;
+    const ok   = !!p.complete;
+
+    if (tot  != null) totCost   += tot;
+    if (marg != null) totMargin += marg;
+
+    return `
+      <tr class="review-row${ok ? '' : ' row-incomplete'}"
+          onclick="window.location='/price/${NEST_ID}/${i + 1}'">
+        <td class="cell-mono">${p.part_number}</td>
+        <td>${p.drawing_desc || '—'}</td>
+        <td class="cell-mono">${p.material || '—'}</td>
+        <td class="cell-num">${p.total_qty || '—'}</td>
+        <td class="cell-num">${fmt(cpp)}</td>
+        <td class="cell-num">${fmt(tot)}</td>
+        <td class="cell-num cell-margin">${fmt(marg)}</td>
+        <td style="text-align:center">
+          <span class="badge ${ok ? 'badge-matched' : 'badge-warn'}">${ok ? 'Complete' : 'Incomplete'}</span>
+        </td>
+      </tr>`;
+  }).join('');
+
+  const totEl = document.getElementById('review-totals');
+  totEl.innerHTML = `
+    <div class="totals-bar">
+      <div class="totals-item">
+        <span class="totals-label">Quote Total · Cost</span>
+        <span class="totals-value">${fmt(totCost)}</span>
+      </div>
+      <div class="totals-item totals-right">
+        <span class="totals-label">Quote Total · With Margin</span>
+        <span class="totals-value totals-margin">${fmt(totMargin)}</span>
+      </div>
+    </div>`;
+}
+
+document.getElementById('btn-generate').addEventListener('click', async () => {
+  const all = loadAll();
+  const btn = document.getElementById('btn-generate');
+  btn.disabled    = true;
+  btn.textContent = 'Saving…';
+  try {
+    const res = await fetch('/price/' + NEST_ID + '/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(all),
+    });
+    const r = await res.json();
+    if (r.ok) {
+      btn.textContent = 'Saved ✓';
+      PARTS.forEach((_, i) => sessionStorage.removeItem('quote_' + NEST_ID + '_' + (i + 1)));
+    } else {
+      throw new Error();
+    }
+  } catch {
+    btn.textContent = 'Error — try again';
+    btn.disabled = false;
+  }
+});
+
+render();
+</script>
+{% endblock %}

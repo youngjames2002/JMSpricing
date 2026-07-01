@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block header_nav %}
+<a href="/upload" class="back-link">← Back</a>
+{% endblock %}
+
+{% block content %}
+<div class="match-page">
+
+  <div class="match-header">
+    <p class="eyebrow">Match Review</p>
+    <h1 class="match-title">Check the matches before pricing</h1>
+    <p class="match-subtext">Bad joins cost you later. Flagged rows are missing a drawing or a catalogue price — sort them here, or carry on and enter the values per part.</p>
+  </div>
+
+  {% if csv_warnings %}
+  <div class="csv-warnings">
+    {% for w in csv_warnings %}<p>{{ w }}</p>{% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="match-stats">
+    <div class="stat-card">
+      <div class="stat-value">{{ stats.total }}</div>
+      <div class="stat-label">Parts Found</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">{{ stats.drawings_matched }}</div>
+      <div class="stat-label">Drawings Matched</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value {% if stats.no_drawing > 0 %}stat-value-warn{% endif %}">{{ stats.no_drawing }}</div>
+      <div class="stat-label">No Drawing</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value {% if stats.not_priced > 0 %}stat-value-warn{% endif %}">{{ stats.not_priced }}</div>
+      <div class="stat-label">Not in Price List</div>
+    </div>
+  </div>
+
+  <form method="POST" action="/match/{{ nest_id }}/confirm">
+    <table>
+      <thead>
+        <tr>
+          <th>Part No</th>
+          <th>Description</th>
+          <th>Material</th>
+          <th>Drawing</th>
+          <th>Price</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for part in parts %}
+        {% set flagged = not part.drawing or not part.has_pricing %}
+        <tr class="{% if flagged %}row-flagged{% endif %}">
+          <td class="cell-mono">{{ part.part_number }}</td>
+          <td>{{ part.description or "—" }}</td>
+          <td class="cell-mono">{{ part.material }}</td>
+          <td>
+            {% if part.drawing %}
+            <span class="badge badge-matched">Matched</span>
+            {% else %}
+            <span class="badge badge-warn">No Drawing</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if part.has_pricing %}
+            <span class="badge badge-neutral">In List</span>
+            {% else %}
+            <span class="badge badge-warn-outline">Not Priced</span>
+            {% endif %}
+          </td>
+          <td class="cell-action">
+            <input type="hidden"
+                   name="drawing_{{ part.part_number }}"
+                   id="did_{{ loop.index }}"
+                   value="{{ part.drawing.id if part.drawing else '' }}">
+            {% if not part.drawing %}
+              {% if unmatched_drawings %}
+              <button type="button" class="btn-assign"
+                      id="btn_{{ loop.index }}"
+                      onclick="showAssign({{ loop.index }})">Assign drawing</button>
+              <select class="assign-select"
+                      id="sel_{{ loop.index }}"
+                      style="display:none"
+                      onchange="assignDrawing({{ loop.index }}, this.value)">
+                <option value="">— select —</option>
+                {% for d in unmatched_drawings %}
+                <option value="{{ d.id }}">{{ d.name }}</option>
+                {% endfor %}
+              </select>
+              {% else %}
+              <span class="no-match-note">No drawings available</span>
+              {% endif %}
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="match-actions">
+      <a href="/upload" class="btn-back">← Back</a>
+      <button type="submit" class="btn-start">Start pricing →</button>
+    </div>
+  </form>
+
+</div>
+
+<script>
+  function showAssign(idx) {
+    document.getElementById('btn_' + idx).style.display = 'none';
+    document.getElementById('sel_' + idx).style.display = 'inline-block';
+  }
+
+  function assignDrawing(idx, val) {
+    document.getElementById('did_' + idx).value = val;
+  }
+</script>
+{% endblock %}

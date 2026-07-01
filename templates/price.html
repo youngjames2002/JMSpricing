@@ -1,0 +1,526 @@
+{% extends "base.html" %}
+
+{% block app_class %}app-price{% endblock %}
+
+{% block header_nav %}
+<a href="/match/{{ nest_id }}" class="back-link" onclick="persistState()">← Match</a>
+{% endblock %}
+
+{% block content %}
+<div class="price-vertical">
+
+  <!-- ── Drawing preview ─────────────────────────── -->
+  <div class="price-preview">
+    <div class="preview-scroll" id="preview-scroll">
+      {% if drawing_image_url %}
+      <img id="drawing-img" src="{{ drawing_image_url }}" alt="Drawing preview">
+      {% else %}
+      <div class="no-drawing-pane">No drawing matched for this part</div>
+      {% endif %}
+    </div>
+    {% if drawing_image_url %}
+    <div class="preview-toolbar">
+      <button class="zoom-btn" onclick="imgZoom(-1)">− Zoom out</button>
+      <button class="zoom-btn" onclick="imgReset()">Fit</button>
+      <button class="zoom-btn" onclick="imgZoom(1)">Zoom in +</button>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- ── Card carousel + price sidebar ──────────── -->
+  <div class="price-cards-area">
+
+    <button class="cards-arrow" id="card-prev" onclick="stepCard(-1)" disabled>‹</button>
+
+    <div class="cards-main">
+      <div class="card-tabs">
+        <button class="card-tab card-tab-active" data-card="0" onclick="goCard(0)">Part Details</button>
+        <button class="card-tab" data-card="1" onclick="goCard(1)">Material</button>
+        <button class="card-tab" data-card="2" onclick="goCard(2)">Costs &amp; Margin</button>
+        <button class="card-tab" data-card="3" onclick="goCard(3)">Processes</button>
+      </div>
+
+      <!-- Card 0 — Part details (editable) -->
+      <div class="card-panel card-active" id="card-0">
+        <div class="part-header">
+          <div class="ph-cell">
+            <span class="ph-label">Part Number</span>
+            <span class="ph-value ph-mono">{{ part.part_number }}</span>
+          </div>
+          <div class="ph-cell">
+            <span class="ph-label">Rev</span>
+            <input class="ph-input ph-mono" id="ph-rev" type="text"
+                   value="{{ part.drawing_revision or '' }}" placeholder="—">
+          </div>
+          <div class="ph-cell ph-border-right-none">
+            <span class="ph-label">Qty</span>
+            <input class="ph-input ph-mono" id="ph-qty" type="number"
+                   value="{{ part.total_qty or '' }}" min="1" step="1">
+          </div>
+          <div class="ph-cell">
+            <span class="ph-label">Material</span>
+            <input class="ph-input ph-mono" id="ph-mat" type="text"
+                   value="{{ part.material or '' }}" placeholder="—">
+          </div>
+          <div class="ph-cell">
+            <span class="ph-label">Thk (mm)</span>
+            <input class="ph-input ph-mono" id="ph-thk" type="number"
+                   value="{{ part.thickness_mm or '' }}" step="0.1" placeholder="—">
+          </div>
+          <div class="ph-cell ph-border-right-none">
+            <span class="ph-label">Laser (s)</span>
+            <input class="ph-input ph-mono" id="ph-laser-s" type="number"
+                   value="{{ part.process_time_seconds or '' }}" step="1" placeholder="—">
+          </div>
+          <div class="ph-cell ph-span3">
+            <span class="ph-label">Description</span>
+            <input class="ph-input" id="ph-desc" type="text"
+                   value="{{ part.drawing_desc or '' }}" placeholder="—">
+          </div>
+          <div class="ph-cell ph-last-row">
+            <span class="ph-label">Size X (mm)</span>
+            <input class="ph-input ph-mono" id="ph-size-x" type="number"
+                   value="{{ part.size_x_mm or '' }}" step="0.1" placeholder="—">
+          </div>
+          <div class="ph-cell ph-last-row">
+            <span class="ph-label">Size Y (mm)</span>
+            <input class="ph-input ph-mono" id="ph-size-y" type="number"
+                   value="{{ part.size_y_mm or '' }}" step="0.1" placeholder="—">
+          </div>
+          <div class="ph-cell ph-border-right-none ph-last-row">
+            <span class="ph-label">Catalogue</span>
+            <span class="ph-value">{{ catalogue or '—' }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Card 1 — Material -->
+      <div class="card-panel" id="card-1">
+        <label class="field-label">
+          Material Cost / m²
+          {% if material_cost is not none %}<span class="badge-auto">Auto</span>{% endif %}
+        </label>
+        <input class="price-input price-input-md" id="material_cost_m2"
+               type="number" step="0.01" min="0" placeholder="0.00">
+        {% if catalogue %}
+        <p class="field-hint">From catalogue. Override here if needed.</p>
+        {% else %}
+        <p class="field-hint field-hint-warn">Material not in price list — enter cost per m² manually.</p>
+        {% endif %}
+        <a href="/rates" target="_blank" class="ps-action" style="margin-top:12px;display:inline-block">Edit price list ↗</a>
+      </div>
+
+      <!-- Card 2 — Costs & Margin -->
+      <div class="card-panel" id="card-2">
+        <div class="costs-grid">
+          <div class="field-block">
+            <label class="field-label">Purchased / Part</label>
+            <input class="price-input" id="purchased" type="number" step="0.01" min="0" placeholder="0.00">
+          </div>
+          <div class="field-block">
+            <label class="field-label">Finish / Part</label>
+            <input class="price-input" id="finish_cost" type="number" step="0.01" min="0" placeholder="0.00">
+          </div>
+          <div class="field-block">
+            <label class="field-label">Sticker / Part</label>
+            <input class="price-input" id="sticker_cost" type="number" step="0.01" min="0" placeholder="0.07">
+          </div>
+          <div class="field-block">
+            <label class="field-label">Delivery / Part</label>
+            <input class="price-input" id="delivery_cost" type="number" step="0.01" min="0" placeholder="5.00">
+          </div>
+          <div class="field-block">
+            <label class="field-label">Misc / Part</label>
+            <input class="price-input" id="misc_cost" type="number" step="0.01" min="0" placeholder="0.00">
+          </div>
+          <div class="field-block">
+            <label class="field-label">Margin %</label>
+            <input class="price-input" id="margin_pct" type="number" step="0.1" min="0" placeholder="10">
+          </div>
+        </div>
+      </div>
+
+      <!-- Card 3 — Processes -->
+      <div class="card-panel" id="card-3">
+        <div class="proc-toggles">
+          <button class="proc-btn" data-proc="fold">Fold</button>
+          <button class="proc-btn" data-proc="tube">Tube</button>
+          <button class="proc-btn" data-proc="weld">Weld</button>
+          <button class="proc-btn" data-proc="saw">Saw</button>
+          <button class="proc-btn" data-proc="machine">Machine</button>
+          <button class="proc-btn" data-proc="assembly">Assembly</button>
+          <span class="ps-note" style="margin-left:auto;align-self:center">Laser always on</span>
+        </div>
+
+        <div class="proc-form" id="proc-fold">
+          <p class="proc-form-title">Fold</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">
+                Folds
+                <span class="badge-from-drawing" id="bend-source" style="display:none">From Drawing</span>
+              </label>
+              <input class="price-input" id="num_folds" type="number" min="0" step="1" placeholder="0">
+            </div>
+            <div class="field-block">
+              <label class="field-label">Mins / Fold</label>
+              <input class="price-input" id="mins_per_fold" type="number" min="0" step="0.01" placeholder="0.25">
+            </div>
+            <div class="field-block">
+              <label class="field-label">Setup (min)</label>
+              <input class="price-input" id="fold_setup_mins" type="number" min="0" step="0.1" placeholder="5">
+            </div>
+          </div>
+        </div>
+
+        <div class="proc-form" id="proc-tube">
+          <p class="proc-form-title">Tube</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">Cut Time (min)</label>
+              <input class="price-input" id="tube_cut_time_mins" type="number" min="0" step="0.1" placeholder="0">
+            </div>
+            <div class="field-block">
+              <label class="field-label">kg / Metre</label>
+              <input class="price-input" id="tube_kg_per_metre" type="number" min="0" step="0.01" placeholder="0">
+            </div>
+            <div class="field-block">
+              <label class="field-label">Length (m)</label>
+              <input class="price-input" id="tube_length_m" type="number" min="0" step="0.01" placeholder="0">
+            </div>
+            <div class="field-block">
+              <label class="field-label">Material (£/kg)</label>
+              <input class="price-input" id="tube_cost_per_kg" type="number" min="0" step="0.01" placeholder="0">
+            </div>
+          </div>
+        </div>
+
+        <div class="proc-form" id="proc-weld">
+          <p class="proc-form-title">Weld</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">Weld Time (min)</label>
+              <input class="price-input" id="weld_time_mins" type="number" min="0" step="0.1" placeholder="0">
+            </div>
+          </div>
+        </div>
+
+        <div class="proc-form" id="proc-saw">
+          <p class="proc-form-title">Saw</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">Number of Cuts</label>
+              <input class="price-input" id="saw_num_cuts" type="number" min="0" step="1" placeholder="0">
+            </div>
+            <div class="field-block">
+              <label class="field-label">Mins / Cut</label>
+              <input class="price-input" id="saw_mins_per_cut" type="number" min="0" step="0.1" placeholder="0">
+            </div>
+            <div class="field-block">
+              <label class="field-label">Setup (min)</label>
+              <input class="price-input" id="saw_setup_mins" type="number" min="0" step="0.1" placeholder="0">
+            </div>
+          </div>
+        </div>
+
+        <div class="proc-form" id="proc-machine">
+          <p class="proc-form-title">Machine</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">Machine Time (min)</label>
+              <input class="price-input" id="machine_time_mins" type="number" min="0" step="0.1" placeholder="0">
+            </div>
+          </div>
+        </div>
+
+        <div class="proc-form" id="proc-assembly">
+          <p class="proc-form-title">Assembly</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">Assembly Time (min)</label>
+              <input class="price-input" id="assembly_time_mins" type="number" min="0" step="0.1" placeholder="0">
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /cards-main -->
+
+    <button class="cards-arrow cards-arrow-right" id="card-next" onclick="stepCard(1)">›</button>
+
+    <!-- ── Price sidebar ───────────────────── -->
+    <div class="price-sidebar">
+      <div class="psb-item">
+        <span class="psb-label">Cost / Part</span>
+        <span class="psb-value" id="disp-cpp">—</span>
+      </div>
+      <div class="psb-item">
+        <span class="psb-label">Total × <span id="disp-qty">{{ part.total_qty or 1 }}</span></span>
+        <span class="psb-value" id="disp-total">—</span>
+      </div>
+      <div class="psb-item">
+        <span class="psb-label">With <span id="disp-mpct">10</span>% Margin</span>
+        <span class="psb-value psb-margin" id="disp-margin">—</span>
+      </div>
+      <div class="psb-status" id="disp-status">—</div>
+    </div>
+
+  </div><!-- /price-cards-area -->
+</div><!-- /price-vertical -->
+
+<!-- ── Navigation bar ──────────────────────────── -->
+<div class="price-nav">
+  {% if part_index > 1 %}
+  <a href="/price/{{ nest_id }}/{{ part_index - 1 }}" class="pnav-btn" onclick="persistState()">← Prev</a>
+  {% else %}
+  <span class="pnav-btn pnav-disabled">← Prev</span>
+  {% endif %}
+
+  <select class="pnav-select" onchange="goToPart(this.value)">
+    {% for pn in part_numbers %}
+    <option value="{{ loop.index }}" {% if loop.index == part_index %}selected{% endif %}>
+      Part {{ loop.index }} of {{ total_parts }} · {{ pn }}
+    </option>
+    {% endfor %}
+  </select>
+
+  <a href="/price/{{ nest_id }}/review" class="pnav-btn" onclick="persistState()">Review all</a>
+
+  <button class="pnav-btn pnav-primary" onclick="saveAndNext()">
+    {% if part_index < total_parts %}Save &amp; next →{% else %}Review all →{% endif %}
+  </button>
+</div>
+
+<script>
+const SESSION_KEY = 'quote_{{ nest_id }}_{{ part_index }}';
+const S = {
+  nestId:      {{ nest_id }},
+  partIndex:   {{ part_index }},
+  totalParts:  {{ total_parts }},
+  nestPartId:  {{ part.id }},
+  qty:         {{ part.total_qty or 1 }},
+  sizeX:       {{ part.size_x_mm or 0 }},
+  sizeY:       {{ part.size_y_mm or 0 }},
+  processSecs: {{ part.process_time_seconds or 0 }},
+  matCost:     {{ material_cost | tojson }},
+  bendCount:   {{ part.bend_count or 0 }},
+  bending:     {{ 'true' if part.bending_required else 'false' }},
+};
+
+const DEFAULTS = {
+  material_cost_m2:   S.matCost,
+  num_folds:          S.bending && S.bendCount > 0 ? S.bendCount : 0,
+  mins_per_fold:      0.25,
+  fold_setup_mins:    5,
+  purchased:          0,
+  finish_cost:        0,
+  sticker_cost:       0.07,
+  delivery_cost:      5,
+  misc_cost:          0,
+  margin_pct:         10,
+  active_processes:   S.bending && S.bendCount > 0 ? ['fold'] : [],
+  tube_cut_time_mins: 0, tube_kg_per_metre: 0, tube_length_m: 0, tube_cost_per_kg: 0,
+  weld_time_mins:     0,
+  saw_num_cuts:       0, saw_mins_per_cut: 0, saw_setup_mins: 0,
+  machine_time_mins:  0, assembly_time_mins: 0,
+};
+
+let state = (() => {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) : { ...DEFAULTS };
+  } catch { return { ...DEFAULTS }; }
+})();
+
+// ── Card navigation ──────────────────────────────────────
+const CARD_COUNT = 4;
+let currentCard  = 0;
+
+function goCard(idx) {
+  document.getElementById('card-' + currentCard).classList.remove('card-active');
+  document.querySelector('[data-card="' + currentCard + '"]').classList.remove('card-tab-active');
+  currentCard = idx;
+  document.getElementById('card-' + currentCard).classList.add('card-active');
+  document.querySelector('[data-card="' + currentCard + '"]').classList.add('card-tab-active');
+  document.getElementById('card-prev').disabled = currentCard === 0;
+  document.getElementById('card-next').disabled = currentCard === CARD_COUNT - 1;
+}
+
+function stepCard(dir) { goCard(Math.max(0, Math.min(CARD_COUNT - 1, currentCard + dir))); }
+
+// ── Field helpers ────────────────────────────────────────
+function fv(id) { return parseFloat(document.getElementById(id)?.value) || 0; }
+function iv(id) { return parseInt(document.getElementById(id)?.value)   || 0; }
+function sv(id, v) { const el = document.getElementById(id); if (el && v != null) el.value = v; }
+function tv(id)    { return document.getElementById(id)?.value || ''; }
+
+function collect() {
+  const active = [...document.querySelectorAll('.proc-btn.proc-on')].map(b => b.dataset.proc);
+  return {
+    nest_part_id:         S.nestPartId,
+    qty:                  iv('ph-qty')      || S.qty,
+    size_x_mm:            fv('ph-size-x')   || S.sizeX,
+    size_y_mm:            fv('ph-size-y')   || S.sizeY,
+    process_time_seconds: fv('ph-laser-s')  || S.processSecs,
+    ph_rev:               tv('ph-rev'),
+    ph_thk:               tv('ph-thk'),
+    ph_mat:               tv('ph-mat'),
+    ph_desc:              tv('ph-desc'),
+    material_cost_m2:     fv('material_cost_m2'),
+    num_folds:            iv('num_folds'),
+    mins_per_fold:        fv('mins_per_fold'),
+    fold_setup_mins:      fv('fold_setup_mins'),
+    purchased:            fv('purchased'),
+    finish_cost:          fv('finish_cost'),
+    sticker_cost:         fv('sticker_cost'),
+    delivery_cost:        fv('delivery_cost'),
+    misc_cost:            fv('misc_cost'),
+    margin_pct:           fv('margin_pct'),
+    active_processes:     active,
+    tube_cut_time_mins:   fv('tube_cut_time_mins'),
+    tube_kg_per_metre:    fv('tube_kg_per_metre'),
+    tube_length_m:        fv('tube_length_m'),
+    tube_cost_per_kg:     fv('tube_cost_per_kg'),
+    weld_time_mins:       fv('weld_time_mins'),
+    saw_num_cuts:         iv('saw_num_cuts'),
+    saw_mins_per_cut:     fv('saw_mins_per_cut'),
+    saw_setup_mins:       fv('saw_setup_mins'),
+    machine_time_mins:    fv('machine_time_mins'),
+    assembly_time_mins:   fv('assembly_time_mins'),
+  };
+}
+
+// ── Init ─────────────────────────────────────────────────
+function initForm() {
+  // Part detail overrides from saved state
+  if (state.ph_rev  != null) sv('ph-rev',     state.ph_rev);
+  if (state.ph_thk  != null) sv('ph-thk',     state.ph_thk);
+  if (state.ph_mat  != null) sv('ph-mat',      state.ph_mat);
+  if (state.ph_desc != null) sv('ph-desc',     state.ph_desc);
+  if (state.qty     != null) sv('ph-qty',      state.qty);
+  if (state.size_x_mm != null) sv('ph-size-x', state.size_x_mm);
+  if (state.size_y_mm != null) sv('ph-size-y', state.size_y_mm);
+  if (state.process_time_seconds != null) sv('ph-laser-s', state.process_time_seconds);
+
+  sv('material_cost_m2',   state.material_cost_m2);
+  sv('num_folds',          state.num_folds);
+  sv('mins_per_fold',      state.mins_per_fold);
+  sv('fold_setup_mins',    state.fold_setup_mins);
+  sv('purchased',          state.purchased);
+  sv('finish_cost',        state.finish_cost);
+  sv('sticker_cost',       state.sticker_cost);
+  sv('delivery_cost',      state.delivery_cost);
+  sv('misc_cost',          state.misc_cost);
+  sv('margin_pct',         state.margin_pct);
+  sv('tube_cut_time_mins', state.tube_cut_time_mins);
+  sv('tube_kg_per_metre',  state.tube_kg_per_metre);
+  sv('tube_length_m',      state.tube_length_m);
+  sv('tube_cost_per_kg',   state.tube_cost_per_kg);
+  sv('weld_time_mins',     state.weld_time_mins);
+  sv('saw_num_cuts',       state.saw_num_cuts);
+  sv('saw_mins_per_cut',   state.saw_mins_per_cut);
+  sv('saw_setup_mins',     state.saw_setup_mins);
+  sv('machine_time_mins',  state.machine_time_mins);
+  sv('assembly_time_mins', state.assembly_time_mins);
+
+  const active = state.active_processes || [];
+  document.querySelectorAll('.proc-btn').forEach(btn => {
+    const on = active.includes(btn.dataset.proc);
+    btn.classList.toggle('proc-on', on);
+    const form = document.getElementById('proc-' + btn.dataset.proc);
+    if (form) form.style.display = on ? 'block' : 'none';
+  });
+
+  if (S.bending && S.bendCount > 0) {
+    const el = document.getElementById('bend-source');
+    if (el) el.style.display = 'inline';
+  }
+
+  recalculate();
+}
+
+// ── Calculate ────────────────────────────────────────────
+let calcTimer = null;
+function scheduleCalc() { clearTimeout(calcTimer); calcTimer = setTimeout(recalculate, 350); }
+
+async function recalculate() {
+  const data = collect();
+  document.getElementById('disp-qty').textContent = data.qty;
+  try {
+    const res = await fetch('/price/calculate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    const r = await res.json();
+    if (r.error) return;
+
+    const fmt = n => '£' + n.toFixed(2);
+    document.getElementById('disp-cpp').textContent    = fmt(r.cost_per_part);
+    document.getElementById('disp-total').textContent  = fmt(r.total_cost);
+    document.getElementById('disp-margin').textContent = fmt(r.margin_total);
+    document.getElementById('disp-mpct').textContent   = data.margin_pct;
+
+    const ready = !!data.material_cost_m2;
+    const el    = document.getElementById('disp-status');
+    el.textContent = ready ? 'Ready' : 'Incomplete';
+    el.className   = 'psb-status ' + (ready ? 'psb-ready' : 'psb-incomplete');
+
+    state = { ...data, cost_per_part: r.cost_per_part, total_cost: r.total_cost,
+              margin_total: r.margin_total, complete: ready };
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(state));
+  } catch {}
+}
+
+// ── Process toggles ──────────────────────────────────────
+document.querySelectorAll('.proc-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const on   = btn.classList.toggle('proc-on');
+    const form = document.getElementById('proc-' + btn.dataset.proc);
+    if (form) form.style.display = on ? 'block' : 'none';
+    scheduleCalc();
+  });
+});
+
+document.querySelectorAll('.price-input, .ph-input').forEach(el => {
+  el.addEventListener('input', scheduleCalc);
+});
+
+// ── Image zoom ───────────────────────────────────────────
+let imgScale = 1;
+
+function imgZoom(dir) {
+  imgScale = Math.max(0.1, Math.min(4, imgScale + dir * 0.1));
+  applyZoom();
+}
+
+function imgReset() { imgScale = 1; applyZoom(); }
+
+function applyZoom() {
+  const img = document.getElementById('drawing-img');
+  if (!img) return;
+  img.style.width    = (imgScale * 100) + '%';
+  img.style.height   = 'auto';
+  img.style.maxWidth = 'none';
+}
+
+// ── Navigation ───────────────────────────────────────────
+function persistState() { sessionStorage.setItem(SESSION_KEY, JSON.stringify(state)); }
+
+function saveAndNext() {
+  persistState();
+  const next = S.partIndex < S.totalParts
+    ? `/price/${S.nestId}/${S.partIndex + 1}`
+    : `/price/${S.nestId}/review`;
+  window.location.href = next;
+}
+
+function goToPart(idx) {
+  persistState();
+  window.location.href = `/price/${S.nestId}/${idx}`;
+}
+
+initForm();
+applyZoom();
+</script>
+{% endblock %}

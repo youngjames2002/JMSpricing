@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block header_nav %}
+<a href="/" class="back-link">← Home</a>
+{% endblock %}
+
+{% block content %}
+<div class="upload-page">
+
+  <div class="upload-zones">
+
+    <div class="drop-zone" id="zone-csv" data-accept=".csv">
+      <input type="file" id="file-csv" accept=".csv" hidden>
+      <div class="dz-type">CSV</div>
+      <div class="dz-label">Nest</div>
+      <div class="dz-hint" id="hint-csv">Click to select the nest CSV</div>
+      <div class="dz-file" id="file-name-csv"></div>
+    </div>
+
+    <div class="drop-zone" id="zone-zip" data-accept=".zip">
+      <input type="file" id="file-zip" accept=".zip" hidden>
+      <div class="dz-type">ZIP</div>
+      <div class="dz-label">Drawings</div>
+      <div class="dz-hint" id="hint-zip">Click to select the drawings zip</div>
+      <div class="dz-file" id="file-name-zip"></div>
+    </div>
+
+  </div>
+
+  <div class="upload-fields">
+    <div class="upload-field">
+      <label class="upload-field-label" for="quote-name">Quote name</label>
+      <input class="upload-field-input" type="text" id="quote-name" autocomplete="off">
+    </div>
+    <div class="upload-field">
+      <label class="upload-field-label" for="customer">Customer</label>
+      <input class="upload-field-input" type="text" id="customer">
+    </div>
+  </div>
+
+  <div class="upload-actions">
+    <span class="upload-error" id="upload-error"></span>
+    <button class="btn-match" id="btn-match">Next</button>
+  </div>
+
+</div>
+
+<script>
+  function setupZone(zoneId, inputId, hintId, fileNameId) {
+    const zone = document.getElementById(zoneId);
+    const input = document.getElementById(inputId);
+    const hint = document.getElementById(hintId);
+    const fileName = document.getElementById(fileNameId);
+
+    zone.addEventListener('click', () => input.click());
+
+    input.addEventListener('change', () => {
+      if (input.files.length) applyFile(input.files[0]);
+    });
+
+    zone.addEventListener('dragover', e => {
+      e.preventDefault();
+      zone.classList.add('dz-over');
+    });
+    zone.addEventListener('dragleave', () => zone.classList.remove('dz-over'));
+    zone.addEventListener('drop', e => {
+      e.preventDefault();
+      zone.classList.remove('dz-over');
+      const f = e.dataTransfer.files[0];
+      if (f) applyFile(f);
+    });
+
+    function applyFile(f) {
+      zone.classList.add('dz-selected');
+      hint.style.display = 'none';
+      fileName.textContent = f.name;
+      zone._file = f;
+      document.getElementById('upload-error').textContent = '';
+    }
+  }
+
+  setupZone('zone-csv', 'file-csv', 'hint-csv', 'file-name-csv');
+  setupZone('zone-zip', 'file-zip', 'hint-zip', 'file-name-zip');
+
+  document.getElementById('btn-match').addEventListener('click', async () => {
+    const csvZone = document.getElementById('zone-csv');
+    const zipZone = document.getElementById('zone-zip');
+    const quoteName = document.getElementById('quote-name').value.trim();
+    const err = document.getElementById('upload-error');
+    const btn = document.getElementById('btn-match');
+
+    if (!csvZone._file) { err.textContent = 'Select a nest CSV first.'; return; }
+    if (!zipZone._file) { err.textContent = 'Select a drawings ZIP first.'; return; }
+    if (!quoteName)     { err.textContent = 'Enter a quote name.'; return; }
+
+    err.textContent = '';
+    btn.disabled = true;
+    btn.textContent = 'Uploading…';
+    const fd = new FormData();
+    fd.append('csv_file', csvZone._file);
+    fd.append('zip_file', zipZone._file);
+    fd.append('quote_name', quoteName);
+    fd.append('customer', document.getElementById('customer').value.trim());
+
+    try {
+      const res = await fetch('/upload', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (data.ok) {
+        window.location.href = `/match/${data.nest_id}`;
+      } else {
+        err.textContent = 'Upload failed.';
+        btn.disabled = false;
+        btn.textContent = 'Next';
+      }
+    } catch {
+      err.textContent = 'Upload failed — please try again.';
+      btn.disabled = false;
+      btn.textContent = 'Next';
+    }
+  });
+</script>
+{% endblock %}
