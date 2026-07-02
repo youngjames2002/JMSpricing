@@ -1,11 +1,13 @@
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
-import io, os, re, uuid, zipfile
+import csv, io, os, re, uuid, zipfile
+from openpyxl import Workbook
+from openpyxl.styles import Font
 import fitz  # PyMuPDF
 from readNestsCSV import parse_nest_csv
 from readDrawings import parse_drawing_pdf
@@ -133,6 +135,12 @@ async def handle_upload(
     )
     nest_id = cur.fetchone()[0]
 
+    cur.execute(
+        "INSERT INTO quote_batches (nest_id, name, customer) VALUES (%s, %s, %s) RETURNING id",
+        (nest_id, quote_name.strip() or None, customer.strip() or None),
+    )
+    batch_id = cur.fetchone()[0]
+
     for pdf_path in pdf_paths:
         cur.execute(
             "INSERT INTO drawings (file_path, imported_at) VALUES (%s, NOW())",
@@ -143,7 +151,8 @@ async def handle_upload(
     cur.close()
     conn.close()
 
-    return JSONResponse({"ok": True, "nest_id": nest_id, "pdf_count": len(pdf_paths)})
+    return JSONResponse({"ok": True, "nest_id": nest_id,
+                         "quote_batch_id": batch_id, "pdf_count": len(pdf_paths)})
 
 
 @app.get("/match/{nest_id}")
@@ -272,6 +281,11 @@ async def confirm_match(request: Request, nest_id: int):
                         tb = parsed["pages"][0]["title_block"]
                         pf = parsed["pages"][0]["pricing_factors"]
                         notes = ", ".join(pf.get("process_notes", []) or []) or None
+                        # Filename ("<part> <description>.pdf") is the most
+                        # reliable description source — same rule as /match.
+                        stem_parts = Path(d_row["file_path"]).stem.split(" ", 1)
+                        desc = (stem_parts[1] if len(stem_parts) > 1 else "") \
+                               or tb.get("description")
                         wc.execute("""
                             UPDATE drawings SET
                                 part_number = %s, revision = %s, description = %s,
@@ -280,7 +294,7 @@ async def confirm_match(request: Request, nest_id: int):
                                 bending_required = %s, bend_count = %s, process_notes = %s
                             WHERE id = %s
                         """, (
-                            tb.get("part_number"), tb.get("revision"), tb.get("description"),
+                            tb.get("part_number"), tb.get("revision"), desc,
                             tb.get("material"), tb.get("thickness_mm"), tb.get("finish"),
                             tb.get("status"), tb.get("drawn_by"),
                             pf.get("bending_required"), pf.get("bend_count"), notes,
@@ -289,12 +303,23 @@ async def confirm_match(request: Request, nest_id: int):
                 except Exception:
                     pass
 
+        # Upsert so re-confirming the match (back button, refresh) re-imports
+        # from the CSV instead of duplicating every part.
         wc.execute("""
             INSERT INTO nest_parts (
                 nest_id, drawing_id, part_number,
                 size_x_mm, size_y_mm, thickness_mm, material,
                 process_time_seconds, total_qty, order_qty
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (nest_id, part_number) DO UPDATE SET
+                drawing_id           = EXCLUDED.drawing_id,
+                size_x_mm            = EXCLUDED.size_x_mm,
+                size_y_mm            = EXCLUDED.size_y_mm,
+                thickness_mm         = EXCLUDED.thickness_mm,
+                material             = EXCLUDED.material,
+                process_time_seconds = EXCLUDED.process_time_seconds,
+                total_qty            = EXCLUDED.total_qty,
+                order_qty            = EXCLUDED.order_qty
         """, (
             nest_id, drawing_id, pn,
             part.get("size_x_mm"), part.get("size_y_mm"), part.get("thickness_mm"),
@@ -308,104 +333,25 @@ async def confirm_match(request: Request, nest_id: int):
     return RedirectResponse(url=f"/price/{nest_id}", status_code=303)
 
 
-# ── Pricing pages ────────────────────────────────────────────────────────────
+# ── Pricing calculation ──────────────────────────────────────────────────────
 
-@app.get("/price/{nest_id}")
-async def price_start(nest_id: int):
-    return RedirectResponse(url=f"/price/{nest_id}/1", status_code=302)
+def calculate_price(d: dict, rates: dict) -> dict:
+    """Compute part pricing from form inputs + a burden_rates row.
 
-
-@app.get("/price/{nest_id}/review")
-async def price_review(request: Request, nest_id: int):
-    conn = get_db()
-    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("""
-        SELECT np.id, np.part_number, np.material, np.total_qty,
-               d.description AS drawing_desc
-        FROM nest_parts np
-        LEFT JOIN drawings d ON d.id = np.drawing_id
-        WHERE np.nest_id = %s ORDER BY np.id
-    """, (nest_id,))
-    parts = [dict(p) for p in cur.fetchall()]
-    cur.close(); conn.close()
-    return templates.TemplateResponse("review.html", {
-        "request": request, "nest_id": nest_id, "parts": parts,
-    })
-
-
-@app.post("/price/{nest_id}/save")
-async def price_save(request: Request, nest_id: int):
-    data = await request.json()
-    conn = get_db()
-    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT id FROM burden_rates WHERE is_active = true LIMIT 1")
-    rates_row = cur.fetchone()
-    cur.execute("SELECT id FROM materials WHERE is_active = true LIMIT 1")
-    mat_row   = cur.fetchone()
-    wc = conn.cursor()
-    for p in data:
-        np_id  = p.get("nest_part_id")
-        if not np_id:
-            continue
-        active = p.get("active_processes", [])
-        wc.execute("""
-            INSERT INTO quotes (
-                nest_part_id, burden_rate_id, material_id, quoted_at, quantity,
-                purchased_total, finish_cost_per_part, sticker_cost, delivery_cost,
-                misc_cost, margin_pct,
-                tube_active, weld_active, saw_active, machine_active, assembly_active,
-                tube_cut_time_mins, tube_kg_per_metre, tube_length_m, tube_cost_per_kg,
-                weld_time_mins, saw_num_cuts, saw_mins_per_cut, saw_setup_mins,
-                machine_time_mins, assembly_time_mins
-            ) VALUES (
-                %s,%s,%s,NOW(),%s, %s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,
-                %s,%s,%s,%s, %s, %s,%s,%s, %s,%s
-            )
-        """, (
-            np_id,
-            rates_row["id"] if rates_row else None,
-            mat_row["id"]   if mat_row   else None,
-            p.get("qty"),
-            p.get("purchased", 0), p.get("finish_cost", 0),
-            p.get("sticker_cost", 0.07), p.get("delivery_cost", 5),
-            p.get("misc_cost", 0),       p.get("margin_pct", 10),
-            "tube" in active, "weld" in active, "saw"      in active,
-            "machine" in active, "assembly" in active,
-            p.get("tube_cut_time_mins"), p.get("tube_kg_per_metre"),
-            p.get("tube_length_m"),      p.get("tube_cost_per_kg"),
-            p.get("weld_time_mins"),
-            p.get("saw_num_cuts"),       p.get("saw_mins_per_cut"),
-            p.get("saw_setup_mins"),     p.get("machine_time_mins"),
-            p.get("assembly_time_mins"),
-        ))
-    conn.commit()
-    cur.close(); wc.close(); conn.close()
-    return JSONResponse({"ok": True})
-
-
-@app.post("/price/calculate")
-async def price_calculate(request: Request):
-    d    = await request.json()
-    conn = get_db()
-    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM burden_rates WHERE is_active = true LIMIT 1")
-    rates = cur.fetchone()
-    cur.close(); conn.close()
-    if not rates:
-        return JSONResponse({"error": "No active burden rates"}, status_code=400)
-
+    Single source of truth for the pricing math — used by the live-calc
+    endpoint and by the save flow, so stored totals always match the UI.
+    """
     def f(k, default=0):
         try: return float(d.get(k) or default)
-        except: return float(default)
+        except (TypeError, ValueError): return float(default)
     def iv(k, default=0):
         try: return int(d.get(k) or default)
-        except: return int(default)
+        except (TypeError, ValueError): return int(default)
 
     qty    = max(iv("qty", 1), 1)
-    active = d.get("active_processes", [])
+    active = d.get("active_processes") or []
 
-    laser  = ((d.get("size_x_mm", 0) * d.get("size_y_mm", 0) / 1_000_000)
+    laser  = ((f("size_x_mm") * f("size_y_mm") / 1_000_000)
                * f("material_cost_m2") * rates["scrap_factor"] * qty
                + (rates["laser_hourly_rate"] / 60) * (f("process_time_seconds") / 60) * qty)
 
@@ -432,22 +378,320 @@ async def price_calculate(request: Request):
     delivery = f("delivery_cost", 5.0)  * qty
     misc     = f("misc_cost")           * qty
 
-    total        = laser + fold + tube + weld + saw + machine + assembly + finish + purchase + sticker + delivery + misc
-    margin_pct   = f("margin_pct", 10)
-    cost_per_part = round(total / qty, 2)
-    margin_total  = round(total * (1 + margin_pct / 100), 2)
+    total      = laser + fold + tube + weld + saw + machine + assembly + finish + purchase + sticker + delivery + misc
+    margin_pct = f("margin_pct", 10)
 
-    return JSONResponse({
-        "cost_per_part": cost_per_part,
+    return {
+        "cost_per_part": round(total / qty, 2),
         "total_cost":    round(total, 2),
-        "margin_total":  margin_total,
+        "margin_total":  round(total * (1 + margin_pct / 100), 2),
         "breakdown": {
             "laser": round(laser, 2), "fold":     round(fold, 2),
             "tube":  round(tube, 2),  "weld":     round(weld, 2),
             "saw":   round(saw, 2),   "machine":  round(machine, 2),
             "assembly": round(assembly, 2),
+            "finish":   round(finish, 2),  "purchased": round(purchase, 2),
+            "sticker":  round(sticker, 2), "delivery":  round(delivery, 2),
+            "misc":     round(misc, 2),
         },
+    }
+
+
+def quote_row_to_state(q: dict) -> dict:
+    """Map a saved quotes row back to the pricing-form state shape used by the
+    front end (sessionStorage / save payload), so quotes can be reopened."""
+    active = []
+    if (q.get("num_folds") or 0) > 0:
+        active.append("fold")
+    for proc in ("tube", "weld", "saw", "machine", "assembly"):
+        if q.get(f"{proc}_active"):
+            active.append(proc)
+    return {
+        "nest_part_id":       q.get("nest_part_id"),
+        "qty":                q.get("quantity"),
+        "material_cost_m2":   q.get("material_cost_m2"),
+        "num_folds":          q.get("num_folds"),
+        "mins_per_fold":      q.get("mins_per_fold"),
+        "fold_setup_mins":    q.get("fold_setup_mins"),
+        "purchased":          q.get("purchased_total"),
+        "finish_cost":        q.get("finish_cost_per_part"),
+        "sticker_cost":       q.get("sticker_cost"),
+        "delivery_cost":      q.get("delivery_cost"),
+        "misc_cost":          q.get("misc_cost"),
+        "margin_pct":         q.get("margin_pct"),
+        "active_processes":   active,
+        "tube_cut_time_mins": q.get("tube_cut_time_mins"),
+        "tube_kg_per_metre":  q.get("tube_kg_per_metre"),
+        "tube_length_m":      q.get("tube_length_m"),
+        "tube_cost_per_kg":   q.get("tube_cost_per_kg"),
+        "weld_time_mins":     q.get("weld_time_mins"),
+        "saw_num_cuts":       q.get("saw_num_cuts"),
+        "saw_mins_per_cut":   q.get("saw_mins_per_cut"),
+        "saw_setup_mins":     q.get("saw_setup_mins"),
+        "machine_time_mins":  q.get("machine_time_mins"),
+        "assembly_time_mins": q.get("assembly_time_mins"),
+        "cost_per_part":      q.get("cost_per_part"),
+        "total_cost":         q.get("line_cost"),
+        "margin_total":       q.get("margin_total"),
+        "complete":           q.get("material_cost_m2") is not None,
+    }
+
+
+# ── Pricing pages ────────────────────────────────────────────────────────────
+
+@app.get("/price/{nest_id}")
+async def price_start(nest_id: int):
+    return RedirectResponse(url=f"/price/{nest_id}/1", status_code=302)
+
+
+@app.get("/price/{nest_id}/review")
+async def price_review(request: Request, nest_id: int):
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT np.*, d.description AS drawing_desc
+        FROM nest_parts np
+        LEFT JOIN drawings d ON d.id = np.drawing_id
+        WHERE np.nest_id = %s ORDER BY np.id
+    """, (nest_id,))
+    parts = [dict(p) for p in cur.fetchall()]
+
+    # Saved lines from the latest batch — fallback for parts the browser has
+    # no sessionStorage state for, so editing a saved quote keeps its values.
+    cur.execute("SELECT id FROM quote_batches WHERE nest_id = %s ORDER BY id DESC LIMIT 1",
+                (nest_id,))
+    batch = cur.fetchone()
+    saved = {}
+    if batch:
+        cur.execute("SELECT * FROM quotes WHERE quote_batch_id = %s", (batch["id"],))
+        saved = {r["nest_part_id"]: quote_row_to_state(dict(r)) for r in cur.fetchall()}
+
+    cur.execute("SELECT * FROM burden_rates WHERE is_active = true LIMIT 1")
+    rates = cur.fetchone()
+    cur.execute("SELECT * FROM materials WHERE is_active = true LIMIT 1")
+    mats  = cur.fetchone()
+
+    for p in parts:
+        state = saved.get(p["id"])
+        if not state and rates:
+            # Same pricing-history fallback as the part page, recomputed with
+            # this nest's quantity/geometry and current rates — otherwise
+            # history-prefilled parts show as Incomplete until each is opened.
+            cur.execute("""
+                SELECT q.* FROM quotes q
+                JOIN nest_parts np2 ON np2.id = q.nest_part_id
+                WHERE UPPER(np2.part_number) = UPPER(%s)
+                ORDER BY q.quoted_at DESC NULLS LAST, q.id DESC
+                LIMIT 1
+            """, (p["part_number"],))
+            hist = cur.fetchone()
+            if hist:
+                state = quote_row_to_state(dict(hist))
+                state["nest_part_id"] = p["id"]
+                state["qty"]          = p["total_qty"]
+                col = _MAT_COL.get(p["material"])
+                if col and mats and mats.get(col) is not None:
+                    state["material_cost_m2"] = mats[col]
+                calc = calculate_price({
+                    **state,
+                    "size_x_mm":            p["size_x_mm"],
+                    "size_y_mm":            p["size_y_mm"],
+                    "process_time_seconds": p["process_time_seconds"],
+                }, rates)
+                state.update(
+                    size_x_mm=p["size_x_mm"], size_y_mm=p["size_y_mm"],
+                    process_time_seconds=p["process_time_seconds"],
+                    cost_per_part=calc["cost_per_part"],
+                    total_cost=calc["total_cost"],
+                    margin_total=calc["margin_total"],
+                    complete=bool(state.get("material_cost_m2")),
+                    prefill_source="history",
+                )
+        p["saved"] = state
+
+    cur.close(); conn.close()
+    return templates.TemplateResponse("review.html", {
+        "request": request, "nest_id": nest_id, "parts": parts,
     })
+
+
+def _opt_num(v):
+    """Parse an optional numeric form value; '' / None / junk → None."""
+    try:
+        return float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_text(v):
+    v = (v or "").strip()
+    return v or None
+
+
+@app.post("/price/{nest_id}/save")
+async def price_save(request: Request, nest_id: int):
+    data = await request.json()
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    cur.execute("SELECT * FROM burden_rates WHERE is_active = true LIMIT 1")
+    rates = cur.fetchone()
+    if not rates:
+        cur.close(); conn.close()
+        return JSONResponse({"error": "No active burden rates"}, status_code=400)
+
+    cur.execute("SELECT id FROM materials WHERE is_active = true LIMIT 1")
+    mat_row     = cur.fetchone()
+    material_id = mat_row["id"] if mat_row else None
+
+    # Latest batch for this nest (created at upload; legacy nests get one now)
+    cur.execute("SELECT id FROM quote_batches WHERE nest_id = %s ORDER BY id DESC LIMIT 1",
+                (nest_id,))
+    batch = cur.fetchone()
+    if batch:
+        batch_id = batch["id"]
+    else:
+        cur.execute("INSERT INTO quote_batches (nest_id) VALUES (%s) RETURNING id", (nest_id,))
+        batch_id = cur.fetchone()["id"]
+
+    cur.execute("SELECT id, drawing_id FROM nest_parts WHERE nest_id = %s", (nest_id,))
+    drawing_of = {r["id"]: r["drawing_id"] for r in cur.fetchall()}
+
+    wc = conn.cursor()
+    subtotal = margin_sum = 0.0
+    for p in data:
+        np_id = p.get("nest_part_id")
+        if np_id not in drawing_of:
+            continue
+
+        result = calculate_price(p, rates)
+        subtotal   += result["total_cost"]
+        margin_sum += result["margin_total"]
+
+        qty = _opt_num(p.get("qty"))
+
+        # Part-detail edits from the pricing page back onto the part / drawing
+        wc.execute("""
+            UPDATE nest_parts SET
+                size_x_mm            = COALESCE(%s, size_x_mm),
+                size_y_mm            = COALESCE(%s, size_y_mm),
+                thickness_mm         = COALESCE(%s, thickness_mm),
+                material             = COALESCE(%s, material),
+                process_time_seconds = COALESCE(%s, process_time_seconds),
+                order_qty            = COALESCE(%s, order_qty)
+            WHERE id = %s
+        """, (
+            _opt_num(p.get("size_x_mm")), _opt_num(p.get("size_y_mm")),
+            _opt_num(p.get("ph_thk")),    _opt_text(p.get("ph_mat")),
+            _opt_num(p.get("process_time_seconds")), qty, np_id,
+        ))
+        if drawing_of[np_id]:
+            wc.execute("""
+                UPDATE drawings SET
+                    revision    = COALESCE(%s, revision),
+                    description = COALESCE(%s, description)
+                WHERE id = %s
+            """, (_opt_text(p.get("ph_rev")), _opt_text(p.get("ph_desc")), drawing_of[np_id]))
+
+        active = p.get("active_processes") or []
+        wc.execute("""
+            INSERT INTO quotes (
+                quote_batch_id, nest_part_id, burden_rate_id, material_id,
+                quoted_at, quantity,
+                purchased_total, finish_cost_per_part, sticker_cost, delivery_cost,
+                misc_cost, margin_pct,
+                material_cost_m2, num_folds, mins_per_fold, fold_setup_mins,
+                tube_active, weld_active, saw_active, machine_active, assembly_active,
+                tube_cut_time_mins, tube_kg_per_metre, tube_length_m, tube_cost_per_kg,
+                weld_time_mins, saw_num_cuts, saw_mins_per_cut, saw_setup_mins,
+                machine_time_mins, assembly_time_mins,
+                cost_per_part, line_cost, margin_total, breakdown
+            ) VALUES (
+                %s,%s,%s,%s, NOW(),%s, %s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,
+                %s,%s,%s,%s,%s,
+                %s,%s,%s,%s, %s, %s,%s,%s, %s,%s,
+                %s,%s,%s,%s
+            )
+            ON CONFLICT (quote_batch_id, nest_part_id) WHERE quote_batch_id IS NOT NULL
+            DO UPDATE SET
+                burden_rate_id = EXCLUDED.burden_rate_id,
+                material_id    = EXCLUDED.material_id,
+                quoted_at      = EXCLUDED.quoted_at,
+                quantity       = EXCLUDED.quantity,
+                purchased_total      = EXCLUDED.purchased_total,
+                finish_cost_per_part = EXCLUDED.finish_cost_per_part,
+                sticker_cost   = EXCLUDED.sticker_cost,
+                delivery_cost  = EXCLUDED.delivery_cost,
+                misc_cost      = EXCLUDED.misc_cost,
+                margin_pct     = EXCLUDED.margin_pct,
+                material_cost_m2 = EXCLUDED.material_cost_m2,
+                num_folds        = EXCLUDED.num_folds,
+                mins_per_fold    = EXCLUDED.mins_per_fold,
+                fold_setup_mins  = EXCLUDED.fold_setup_mins,
+                tube_active      = EXCLUDED.tube_active,
+                weld_active      = EXCLUDED.weld_active,
+                saw_active       = EXCLUDED.saw_active,
+                machine_active   = EXCLUDED.machine_active,
+                assembly_active  = EXCLUDED.assembly_active,
+                tube_cut_time_mins = EXCLUDED.tube_cut_time_mins,
+                tube_kg_per_metre  = EXCLUDED.tube_kg_per_metre,
+                tube_length_m      = EXCLUDED.tube_length_m,
+                tube_cost_per_kg   = EXCLUDED.tube_cost_per_kg,
+                weld_time_mins     = EXCLUDED.weld_time_mins,
+                saw_num_cuts       = EXCLUDED.saw_num_cuts,
+                saw_mins_per_cut   = EXCLUDED.saw_mins_per_cut,
+                saw_setup_mins     = EXCLUDED.saw_setup_mins,
+                machine_time_mins  = EXCLUDED.machine_time_mins,
+                assembly_time_mins = EXCLUDED.assembly_time_mins,
+                cost_per_part = EXCLUDED.cost_per_part,
+                line_cost     = EXCLUDED.line_cost,
+                margin_total  = EXCLUDED.margin_total,
+                breakdown     = EXCLUDED.breakdown
+        """, (
+            batch_id, np_id, rates["id"], material_id,
+            qty or 1,
+            p.get("purchased", 0), p.get("finish_cost", 0),
+            p.get("sticker_cost", 0.07), p.get("delivery_cost", 5),
+            p.get("misc_cost", 0),       p.get("margin_pct", 10),
+            _opt_num(p.get("material_cost_m2")), _opt_num(p.get("num_folds")),
+            _opt_num(p.get("mins_per_fold")),    _opt_num(p.get("fold_setup_mins")),
+            "tube" in active, "weld" in active, "saw" in active,
+            "machine" in active, "assembly" in active,
+            p.get("tube_cut_time_mins"), p.get("tube_kg_per_metre"),
+            p.get("tube_length_m"),      p.get("tube_cost_per_kg"),
+            p.get("weld_time_mins"),
+            p.get("saw_num_cuts"),       p.get("saw_mins_per_cut"),
+            p.get("saw_setup_mins"),     p.get("machine_time_mins"),
+            p.get("assembly_time_mins"),
+            result["cost_per_part"], result["total_cost"], result["margin_total"],
+            psycopg2.extras.Json(result["breakdown"]),
+        ))
+
+    wc.execute("""
+        UPDATE quote_batches SET
+            status = 'final', burden_rate_id = %s, material_id = %s,
+            subtotal = %s, total_with_margin = %s, finalized_at = NOW()
+        WHERE id = %s
+    """, (rates["id"], material_id, round(subtotal, 2), round(margin_sum, 2), batch_id))
+
+    conn.commit()
+    cur.close(); wc.close(); conn.close()
+    return JSONResponse({"ok": True, "quote_batch_id": batch_id})
+
+
+@app.post("/price/calculate")
+async def price_calculate(request: Request):
+    d    = await request.json()
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM burden_rates WHERE is_active = true LIMIT 1")
+    rates = cur.fetchone()
+    cur.close(); conn.close()
+    if not rates:
+        return JSONResponse({"error": "No active burden rates"}, status_code=400)
+
+    return JSONResponse(calculate_price(d, rates))
 
 
 @app.get("/price/{nest_id}/{part_index}")
@@ -477,6 +721,41 @@ async def price_part(request: Request, nest_id: int, part_index: int):
         if row:
             material_cost = row[col]
 
+    # Previously saved line for this part (latest batch) → prefill when the
+    # browser has no sessionStorage state, so saved quotes can be edited.
+    cur.execute("""
+        SELECT q.* FROM quotes q
+        JOIN quote_batches qb ON qb.id = q.quote_batch_id
+        WHERE q.nest_part_id = %s AND qb.nest_id = %s
+        ORDER BY qb.id DESC LIMIT 1
+    """, (part["id"], nest_id))
+    saved_row   = cur.fetchone()
+    saved_state = None
+    if saved_row:
+        saved_state = quote_row_to_state(dict(saved_row))
+    else:
+        # Pricing history: the same part number quoted on any earlier nest.
+        cur.execute("""
+            SELECT q.* FROM quotes q
+            JOIN nest_parts np ON np.id = q.nest_part_id
+            WHERE UPPER(np.part_number) = UPPER(%s)
+            ORDER BY q.quoted_at DESC NULLS LAST, q.id DESC
+            LIMIT 1
+        """, (part["part_number"],))
+        hist = cur.fetchone()
+        if hist:
+            saved_state = quote_row_to_state(dict(hist))
+            saved_state["nest_part_id"] = part["id"]
+            # Job-specific values come from the current nest, not history
+            for k in ("qty", "cost_per_part", "total_cost", "margin_total", "complete"):
+                saved_state.pop(k, None)
+            if material_cost is not None:
+                # Current price list beats the historic material cost
+                saved_state.pop("material_cost_m2", None)
+            saved_state["prefill_source"] = "history"
+            saved_state["prefill_date"]   = (hist["quoted_at"].strftime("%d %b %Y")
+                                             if hist["quoted_at"] else None)
+
     cur.close(); conn.close()
 
     drawing_image_url = None
@@ -495,6 +774,7 @@ async def price_part(request: Request, nest_id: int, part_index: int):
         "material_cost":     material_cost,
         "catalogue":         _MAT_LABEL.get(part["material"], ""),
         "drawing_image_url": drawing_image_url,
+        "saved_state":       saved_state,
     })
 
 
@@ -579,6 +859,334 @@ async def select_rate(rate_id: int):
     cur.close()
     conn.close()
     return JSONResponse({"ok": True})
+
+
+# ── Saved quotes & export ────────────────────────────────────────────────────
+
+def fetch_quote_batch(batch_id: int):
+    """Load a quote batch header + its lines (parts, prices, breakdown)."""
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT qb.*, br.name AS rate_name
+        FROM quote_batches qb
+        LEFT JOIN burden_rates br ON br.id = qb.burden_rate_id
+        WHERE qb.id = %s
+    """, (batch_id,))
+    batch = cur.fetchone()
+    lines = []
+    if batch:
+        cur.execute("SELECT COUNT(*) AS n FROM nest_parts WHERE nest_id = %s",
+                    (batch["nest_id"],))
+        batch["part_count"] = cur.fetchone()["n"]
+        cur.execute("""
+            SELECT q.*, np.part_number, np.material, np.thickness_mm,
+                   d.revision, d.description
+            FROM quotes q
+            JOIN nest_parts np ON np.id = q.nest_part_id
+            LEFT JOIN drawings d ON d.id = np.drawing_id
+            WHERE q.quote_batch_id = %s
+            ORDER BY q.id
+        """, (batch_id,))
+        lines = [dict(r) for r in cur.fetchall()]
+        for l in lines:
+            # Customer-facing price each (margin included)
+            qty = l["quantity"] or 1
+            l["price_each"] = round((l["margin_total"] or 0) / qty, 2)
+    cur.close(); conn.close()
+    return batch, lines
+
+
+def _quote_filename(batch) -> str:
+    # JMS convention: "QUO - 031815 - Groundsman"
+    if batch["quote_no"]:
+        name = f"QUO - {batch['quote_no']} - {batch['customer'] or batch['name'] or batch['id']}"
+    else:
+        name = batch["name"] or f"quote_{batch['id']}"
+    return re.sub(r"[^A-Za-z0-9 _-]+", "_", name).strip("_ ") or f"quote_{batch['id']}"
+
+
+@app.post("/quotes/{batch_id}/meta")
+async def quote_meta(request: Request, batch_id: int):
+    data = await request.json()
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("""
+        UPDATE quote_batches SET
+            quote_no  = %s, contact = %s, raised_by = %s, notes = %s,
+            name      = COALESCE(%s, name),
+            customer  = COALESCE(%s, customer)
+        WHERE id = %s
+    """, (
+        _opt_text(data.get("quote_no")), _opt_text(data.get("contact")),
+        _opt_text(data.get("raised_by")), _opt_text(data.get("notes")),
+        _opt_text(data.get("name")), _opt_text(data.get("customer")),
+        batch_id,
+    ))
+    updated = cur.rowcount
+    conn.commit()
+    cur.close(); conn.close()
+    if not updated:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/quotes")
+async def quotes_list(request: Request):
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT qb.*, COUNT(q.id) AS line_count,
+               (SELECT COUNT(*) FROM nest_parts np WHERE np.nest_id = qb.nest_id) AS part_count
+        FROM quote_batches qb
+        LEFT JOIN quotes q ON q.quote_batch_id = qb.id
+        GROUP BY qb.id
+        ORDER BY qb.created_at DESC
+    """)
+    batches = cur.fetchall()
+    cur.close(); conn.close()
+    return templates.TemplateResponse("quotes.html", {"request": request, "batches": batches})
+
+
+@app.post("/quotes/{batch_id}/delete")
+async def quote_delete(batch_id: int):
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("DELETE FROM quotes WHERE quote_batch_id = %s", (batch_id,))
+    cur.execute("DELETE FROM quote_batches WHERE id = %s", (batch_id,))
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close(); conn.close()
+    if not deleted:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/quotes/{batch_id}")
+async def quote_detail(request: Request, batch_id: int):
+    batch, lines = fetch_quote_batch(batch_id)
+    if not batch:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return templates.TemplateResponse("quote.html", {
+        "request": request, "batch": batch, "lines": lines,
+    })
+
+
+_EXPORT_HEADERS = ["Part No", "Rev", "Description", "Material", "Thk (mm)", "Qty",
+                   "Cost / Part", "Line Cost", "With Margin", "Margin %"]
+
+
+def _export_rows(lines):
+    for l in lines:
+        yield [l["part_number"], l["revision"] or "", l["description"] or "",
+               l["material"] or "", l["thickness_mm"], l["quantity"],
+               l["cost_per_part"], l["line_cost"], l["margin_total"], l["margin_pct"]]
+
+
+@app.get("/quotes/{batch_id}/export.csv")
+async def quote_export_csv(batch_id: int):
+    batch, lines = fetch_quote_batch(batch_id)
+    if not batch:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+
+    buf = io.StringIO()
+    w   = csv.writer(buf)
+    quoted = batch["finalized_at"] or batch["created_at"]
+    w.writerow(["Quotation No.", batch["quote_no"] or batch["id"]])
+    w.writerow(["Quote",         batch["name"] or f"Quote {batch['id']}"])
+    w.writerow(["Customer",      batch["customer"] or ""])
+    w.writerow(["Contact",       batch["contact"] or ""])
+    w.writerow(["Raised by",     batch["raised_by"] or ""])
+    w.writerow(["Date",          quoted.strftime("%Y-%m-%d %H:%M") if quoted else ""])
+    w.writerow(["Rate set",      batch["rate_name"] or ""])
+    w.writerow([])
+    w.writerow(_EXPORT_HEADERS)
+    for row in _export_rows(lines):
+        w.writerow(row)
+    w.writerow([])
+    w.writerow(["Totals", "", "", "", "", "", "", batch["subtotal"], batch["total_with_margin"], ""])
+
+    return Response(buf.getvalue(), media_type="text/csv", headers={
+        "Content-Disposition": f'attachment; filename="{_quote_filename(batch)}.csv"',
+    })
+
+
+# breakdown key → JMS Summary-sheet process row (same order as their workbook)
+_JMS_PROCESS_ROWS = [
+    ("Laser cut",   ("laser",)),
+    ("Tube cut",    ("tube",)),
+    ("Brake press", ("fold",)),
+    ("Saw cut",     ("saw",)),
+    ("Machine",     ("machine",)),
+    ("Welding",     ("weld",)),
+    ("Assembly",    ("assembly",)),
+    ("Finishing",   ("finish",)),
+    ("Misc",        ("misc", "sticker", "delivery", "purchased")),
+]
+
+_GBP_FMT = '"£"#,##0.00'
+
+# materials-table column prefix → grade label (for the Material Prices sheet)
+_MAT_GRADE_LABELS = {
+    "cr4":       "Mild steel CR4",
+    "s275":      "Hot rolled S275",
+    "s355":      "Hot rolled S355",
+    "hardox450": "Hardox 450",
+    "ss304dp1":  "Stainless 304 DP1",
+    "al5251":    "Aluminium 5251",
+    "galv":      "Galvanised",
+    "a1050":     "Aluminium 1050",
+}
+
+
+def _material_price_rows(mat_row: dict):
+    """Yield (grade label, thickness mm, £/m²) from a materials table row."""
+    for col, val in mat_row.items():
+        if col in ("id", "name", "created_at", "is_active") or val is None:
+            continue
+        tokens = col.split("_")
+        if len(tokens) < 3:
+            continue
+        prefix = "_".join(tokens[:-2])
+        try:
+            thickness = float(f"{tokens[-2]}.{tokens[-1]}")
+        except ValueError:
+            continue
+        yield _MAT_GRADE_LABELS.get(prefix, prefix), thickness, val
+
+
+@app.get("/quotes/{batch_id}/export.xlsx")
+async def quote_export_xlsx(batch_id: int):
+    batch, lines = fetch_quote_batch(batch_id)
+    if not batch:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM burden_rates WHERE id = %s", (batch["burden_rate_id"],))
+    rates = cur.fetchone()
+    if batch["material_id"]:
+        cur.execute("SELECT * FROM materials WHERE id = %s", (batch["material_id"],))
+    else:
+        cur.execute("SELECT * FROM materials WHERE is_active = true LIMIT 1")
+    mat_row = cur.fetchone()
+    cur.close(); conn.close()
+
+    bold   = Font(bold=True)
+    wb     = Workbook()
+    quoted = batch["finalized_at"] or batch["created_at"]
+
+    # ── Summary sheet — mirrors the JMS internal costing workbook layout ──
+    ws = wb.active
+    ws.title = "Summary"
+    ws["B1"] = "Customer";        ws["C1"] = batch["customer"] or ""
+    ws["B2"] = "ENQ / SO number"; ws["C2"] = (f"ENQ - {batch['quote_no']}"
+                                              if batch["quote_no"] else batch["name"] or "")
+    ws["B3"] = "Date submitted";  ws["C3"] = quoted
+    ws["C3"].number_format = "d-mmm-yy"
+    for c in ("B1", "B2", "B3"):
+        ws[c].font = bold
+
+    ws["B5"] = "Process"; ws["C5"] = "£"
+    ws["B5"].font = ws["C5"].font = bold
+
+    totals = {}
+    for l in lines:
+        for key, val in (l["breakdown"] or {}).items():
+            totals[key] = totals.get(key, 0.0) + (val or 0)
+
+    r = 6
+    for label, keys in _JMS_PROCESS_ROWS:
+        ws.cell(row=r, column=2, value=label)
+        cell = ws.cell(row=r, column=3, value=round(sum(totals.get(k, 0) for k in keys), 2))
+        cell.number_format = _GBP_FMT
+        r += 1
+
+    ws.cell(row=r, column=2, value="Total").font = bold
+    c_total = ws.cell(row=r, column=3, value=batch["subtotal"])
+    c_total.number_format = _GBP_FMT; c_total.font = bold
+    c_marg = ws.cell(row=r, column=4, value=batch["total_with_margin"])
+    c_marg.number_format = _GBP_FMT; c_marg.font = bold
+    ws.cell(row=r + 1, column=4, value="(with margin)")
+
+    # Hourly-rates panel on the right, like "2026 Hourly Rates"
+    if rates:
+        ws["G5"] = f"Hourly Rates — {rates['name'] or ''}".strip()
+        ws["G5"].font = bold
+        rate_rows = [
+            ("Flat Laser",       rates["laser_hourly_rate"]),
+            ("Tube Laser",       rates["tube_hourly_rate"]),
+            ("Brake Presses",    rates["fold_rate"]),
+            ("Welding / Saw",    rates["weld_saw_rate"]),
+            ("Machine",          rates["machine_rate"]),
+            ("Assembly",         rates["assembly_rate"]),
+            ("Finishing markup", rates["finishing_markup"]),
+            ("Scrap factor",     rates["scrap_factor"]),
+        ]
+        for i, (label, val) in enumerate(rate_rows, start=6):
+            ws.cell(row=i, column=7, value=label)
+            cell = ws.cell(row=i, column=8, value=val)
+            if label not in ("Finishing markup", "Scrap factor"):
+                cell.number_format = _GBP_FMT
+
+    for col, width in (("B", 28.9), ("C", 14), ("D", 14), ("G", 19.9), ("H", 10.7)):
+        ws.column_dimensions[col].width = width
+
+    # ── Parts sheet — customer-facing line items ──
+    ps = wb.create_sheet("Parts")
+    ps.append(["Line", "Part Ref", "Description", "Material", "Thk (mm)",
+               "Rev No.", "Qty.", "Price ea", "Subtotal"])
+    for cell in ps[1]:
+        cell.font = bold
+    for i, l in enumerate(lines, start=1):
+        ps.append([i, l["part_number"], l["description"] or "", l["material"] or "",
+                   l["thickness_mm"], l["revision"] or "", l["quantity"],
+                   l["price_each"], l["margin_total"]])
+        ps.cell(row=ps.max_row, column=8).number_format = _GBP_FMT
+        ps.cell(row=ps.max_row, column=9).number_format = _GBP_FMT
+    ps.append([])
+    ps.append(["", "", "", "", "", "", "NET Total", "", batch["total_with_margin"]])
+    ps.cell(row=ps.max_row, column=7).font = bold
+    net = ps.cell(row=ps.max_row, column=9)
+    net.number_format = _GBP_FMT; net.font = bold
+    for col, width in zip("ABCDEFGHI", (6, 18, 36, 12, 9, 9, 7, 11, 11)):
+        ps.column_dimensions[col].width = width
+
+    # ── Breakdown sheet — per-part per-process costs ──
+    procs = ["laser", "fold", "tube", "weld", "saw", "machine", "assembly",
+             "finish", "purchased", "sticker", "delivery", "misc"]
+    bs = wb.create_sheet("Breakdown")
+    bs.append(["Part No", "Material £/m²"] + [p.capitalize() for p in procs] + ["Line Cost"])
+    for cell in bs[1]:
+        cell.font = bold
+    for l in lines:
+        bd = l["breakdown"] or {}
+        bs.append([l["part_number"], l["material_cost_m2"]]
+                  + [bd.get(p) for p in procs] + [l["line_cost"]])
+    bs.column_dimensions["A"].width = 16
+    bs.column_dimensions["B"].width = 13
+
+    # ── Material Prices sheet — the price set this quote was costed with ──
+    if mat_row:
+        ms = wb.create_sheet("Material Prices")
+        ms.append([f"Material Prices — {mat_row['name'] or ''}".strip()])
+        ms["A1"].font = bold
+        ms.append(["Grade", "Thickness (mm)", "£/m²"])
+        for cell in ms[2]:
+            cell.font = bold
+        for grade, thickness, price in _material_price_rows(dict(mat_row)):
+            ms.append([grade, thickness, price])
+            ms.cell(row=ms.max_row, column=3).number_format = _GBP_FMT
+        for col, width in (("A", 20), ("B", 14), ("C", 10)):
+            ms.column_dimensions[col].width = width
+
+    stream = io.BytesIO()
+    wb.save(stream)
+    return Response(
+        stream.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{_quote_filename(batch)}.xlsx"'},
+    )
 
 
 @app.post("/rates")

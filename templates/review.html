@@ -44,10 +44,11 @@ const PARTS   = {{ parts | tojson }};
 
 function loadAll() {
   return PARTS.map((p, i) => {
+    const saved = p.saved || {};   // last saved DB state (fallback)
     try {
       const raw = sessionStorage.getItem('quote_' + NEST_ID + '_' + (i + 1));
-      return raw ? { ...p, ...JSON.parse(raw) } : { ...p, complete: false };
-    } catch { return { ...p, complete: false }; }
+      return raw ? { ...p, ...saved, ...JSON.parse(raw) } : { ...p, ...saved };
+    } catch { return { ...p, ...saved }; }
   });
 }
 
@@ -112,6 +113,7 @@ document.getElementById('btn-generate').addEventListener('click', async () => {
     if (r.ok) {
       btn.textContent = 'Saved ✓';
       PARTS.forEach((_, i) => sessionStorage.removeItem('quote_' + NEST_ID + '_' + (i + 1)));
+      window.location.href = '/quotes/' + r.quote_batch_id;
     } else {
       throw new Error();
     }

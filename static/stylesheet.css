@@ -104,42 +104,98 @@ td {
 tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: var(--panel-2); }
 
-.home-actions {
-  display: flex;
-  gap: 16px;
-  max-width: 600px;
-  margin: 72px auto 0;
+.home-hero {
+  max-width: 1100px;
+  margin: 56px auto 0;
+  text-align: center;
 }
 
-.home-btn {
+.home-title {
+  font-family: var(--sans);
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--ink);
+  margin: 0 0 8px;
+}
+
+.home-sub {
+  font-size: 15px;
+  color: var(--steel);
+  margin: 0;
+}
+
+.home-flow {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  max-width: 1100px;
+  margin: 48px auto 0;
+}
+
+.flow-card {
   flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 160px;
-  padding: 32px 24px;
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: .14em;
-  text-transform: uppercase;
-  text-align: center;
-  line-height: 1.9;
+  flex-direction: column;
+  gap: 10px;
+  padding: 32px 28px;
+  min-height: 240px;
   text-decoration: none;
   background: var(--panel);
   border: 1px solid var(--line);
   color: var(--ink);
-  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-.home-btn:not([disabled]):hover {
+.flow-card:hover {
   border-color: var(--blue);
-  color: var(--blue);
+  box-shadow: 0 4px 14px rgba(16, 32, 64, .08);
 }
 
-.home-btn[disabled] {
+.flow-card-primary { border: 2px solid var(--blue); }
+
+.flow-step {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--blue);
+  border-radius: 50%;
+}
+
+.flow-title {
+  font-size: 19px;
+  font-weight: 700;
+  margin-top: 6px;
+}
+
+.flow-desc {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--steel);
+  flex: 1;
+}
+
+.flow-cta {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.flow-arrow {
+  align-self: center;
+  font-size: 26px;
   color: var(--steel-2);
-  background: var(--panel-2);
-  cursor: not-allowed;
+  flex: 0 0 auto;
 }
 
 /* ── Rates page layout ──────────────────────────────────── */
@@ -368,27 +424,27 @@ tbody tr:hover { background: var(--panel-2); }
 /* ── Upload page ────────────────────────────────────────── */
 
 .upload-page {
-  max-width: 900px;
+  max-width: 1100px;
   margin: 48px auto 0;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 28px;
 }
 
 .upload-zones {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 20px;
 }
 
 .drop-zone {
   background: var(--panel);
-  border: 1.5px dashed var(--line);
-  padding: 48px 32px;
+  border: 2px dashed var(--line);
+  padding: 80px 40px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
   user-select: none;
@@ -407,12 +463,12 @@ tbody tr:hover { background: var(--panel-2); }
 
 .dz-type {
   font-family: var(--mono);
-  font-size: 32px;
+  font-size: 44px;
   font-weight: 700;
   letter-spacing: .12em;
   color: var(--line);
   line-height: 1;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .drop-zone.dz-selected .dz-type {
@@ -421,14 +477,14 @@ tbody tr:hover { background: var(--panel-2); }
 
 .dz-label {
   font-family: var(--sans);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 19px;
+  font-weight: 700;
   color: var(--ink);
 }
 
 .dz-hint {
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: 14px;
   color: var(--blue);
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -436,10 +492,10 @@ tbody tr:hover { background: var(--panel-2); }
 
 .dz-file {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: .04em;
   color: var(--steel);
-  margin-top: 4px;
+  margin-top: 6px;
   word-break: break-all;
   text-align: center;
 }
@@ -458,7 +514,7 @@ tbody tr:hover { background: var(--panel-2); }
 
 .upload-field-label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: .14em;
   text-transform: uppercase;
   color: var(--steel);
@@ -466,11 +522,11 @@ tbody tr:hover { background: var(--panel-2); }
 
 .upload-field-input {
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--ink);
   background: var(--panel);
   border: 1px solid var(--line);
-  padding: 8px 12px;
+  padding: 12px 14px;
   outline: none;
   transition: border-color 0.15s;
 }
@@ -494,13 +550,13 @@ tbody tr:hover { background: var(--panel-2); }
 
 .btn-match {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: .12em;
   text-transform: uppercase;
   color: #fff;
   background: var(--blue);
   border: none;
-  padding: 10px 20px;
+  padding: 14px 32px;
   cursor: pointer;
   transition: background 0.15s;
 }

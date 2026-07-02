@@ -18,3 +18,4 @@ psycopg2-binary==2.9.12
 python-dotenv==1.2.2
 pdfplumber==0.11.10
 PyMuPDF
+openpyxl==3.1.5

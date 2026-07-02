@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block header_nav %}
+<a href="/" class="back-link">← Home</a>
+{% endblock %}
+
+{% block content %}
+<div class="review-page">
+
+  <p class="eyebrow">Quote History</p>
+  <h1 class="review-title">Past Quotes</h1>
+  <p class="review-subtext">Click a quote to view its parts, prices and exports.</p>
+
+  {% if batches %}
+  <table>
+    <thead>
+      <tr>
+        <th>Quote</th>
+        <th>Customer</th>
+        <th>Created</th>
+        <th style="text-align:right">Parts</th>
+        <th style="text-align:right">Cost</th>
+        <th style="text-align:right">With Margin</th>
+        <th style="text-align:center">Status</th>
+        <th style="text-align:center">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for b in batches %}
+      <tr class="review-row" onclick="window.location='/quotes/{{ b.id }}'">
+        <td>{{ b.name or 'Quote ' ~ b.id }}</td>
+        <td>{{ b.customer or '—' }}</td>
+        <td class="cell-mono">{{ b.created_at.strftime('%d %b %Y') }}</td>
+        <td class="cell-num">{{ b.line_count }}</td>
+        <td class="cell-num">{% if b.subtotal is not none %}£{{ '%.2f' | format(b.subtotal) }}{% else %}—{% endif %}</td>
+        <td class="cell-num cell-margin">{% if b.total_with_margin is not none %}£{{ '%.2f' | format(b.total_with_margin) }}{% else %}—{% endif %}</td>
+        <td style="text-align:center">
+          <span class="badge {{ 'badge-matched' if b.status == 'final' else 'badge-warn' }}">
+            {{ 'Final' if b.status == 'final' else 'Draft' }}
+          </span>
+        </td>
+        <td class="cell-action" onclick="event.stopPropagation()">
+          {% if b.nest_id %}
+          <a class="btn-edit" href="{{ '/price/' ~ b.nest_id ~ '/review' if b.part_count else '/match/' ~ b.nest_id }}">Edit</a>
+          {% endif %}
+          <button class="btn-cancel" onclick="deleteQuote({{ b.id }})">Delete</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <style>
+    .cell-action a.btn-edit { text-decoration: none; display: inline-block; }
+  </style>
+  <script>
+    async function deleteQuote(id) {
+      if (!confirm('Delete this quote? This cannot be undone.')) return;
+      try {
+        const res = await fetch('/quotes/' + id + '/delete', { method: 'POST' });
+        const r   = await res.json();
+        if (r.ok) window.location.reload();
+        else alert('Delete failed.');
+      } catch { alert('Delete failed.'); }
+    }
+  </script>
+  {% else %}
+  <p class="review-subtext">No quotes yet — <a href="/upload">price a new order</a> to create one.</p>
+  {% endif %}
+
+</div>
+{% endblock %}

@@ -65,9 +65,12 @@ def _extract_title_block(page) -> dict:
             if m:
                 tb["part_number"] = m.group(1)
                 break
-        # Generic revision: look for standalone number after REV label,
-        # but NOT "Revised" or "Revision" words
-        m = re.search(r"\bREV(?:ISION)?\s*[:\-]?\s*([A-Z0-9]+)\b", text, re.I)
+        # Explicit "REVISION: x" label (SolidWorks/Groundsman title blocks)
+        m = re.search(r"REVISION\s*:\s*([A-Z0-9]+)\b", text, re.I)
+        if not m:
+            # Generic revision: standalone value after a REV label. \b after the
+            # group stops "REVISIONS" (table header) matching as REVISION + "S".
+            m = re.search(r"\bREV(?:ISION)?\b\s*[:\-]?\s*([A-Z0-9]+)\b", text, re.I)
         if m and m.group(1).upper() not in ("BY", "DATE", "HISTORY", "ISED", "ISION"):
             tb["revision"] = m.group(1)
 
@@ -77,6 +80,13 @@ def _extract_title_block(page) -> dict:
     if m:
         tb["description"] = _clean(m.group(1))
     else:
+        # Revision-table headers ("ZONE REV. DESCRIPTION DATE APPROVED") make the
+        # generic DESCRIPTION pattern capture neighbouring labels — reject those.
+        _label_junk = re.compile(
+            r"(?:ZONE|REV\.?|DESCRIPTION|DATE|APPROVED|SOURCING)"
+            r"(?:\s+(?:ZONE|REV\.?|DESCRIPTION|DATE|APPROVED|SOURCING))*",
+            re.I,
+        )
         for pat in (
             r"DESCRIPTION\s+SOURCING\s*\n\s*(.+?)(?:\n|make_or_buy)",
             r"DESCRIPTION\s*[:\-]?\s*(.+?)(?:\n|DRAWING|PART\s+NUMBER)",
@@ -85,7 +95,7 @@ def _extract_title_block(page) -> dict:
             m = re.search(pat, text, re.I | re.S)
             if m:
                 candidate = _clean(m.group(1))
-                if len(candidate) > 3 and candidate not in ("SOURCING",):
+                if len(candidate) > 3 and not _label_junk.fullmatch(candidate):
                     tb["description"] = candidate
                     break
 

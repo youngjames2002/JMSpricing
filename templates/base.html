@@ -14,9 +14,34 @@
     </header>
     <main class="app {% block app_class %}{% endblock %}">
         {% block content %}
-        <div class="home-actions">
-            <a href="/rates" class="home-btn">Material Costs and Burden Rates</a>
-            <a href="/upload" class="home-btn">Price New Order</a>
+        <div class="home-hero">
+            <h2 class="home-title">Price a laser order, start to finish</h2>
+            <p class="home-sub">From nest CSV and drawings to a customer-ready quotation.</p>
+        </div>
+        <div class="home-flow">
+            <a href="/rates" class="flow-card">
+                <span class="flow-step">1</span>
+                <span class="flow-title">Rates &amp; Materials</span>
+                <span class="flow-desc">Check material prices and hourly burden rates. The active
+                    set is used for every new quote.</span>
+                <span class="flow-cta">Open rates →</span>
+            </a>
+            <span class="flow-arrow">→</span>
+            <a href="/upload" class="flow-card flow-card-primary">
+                <span class="flow-step">2</span>
+                <span class="flow-title">Price New Order</span>
+                <span class="flow-desc">Upload the nest CSV and drawings zip, match parts to
+                    drawings, then price each part in turn.</span>
+                <span class="flow-cta">Start a quote →</span>
+            </a>
+            <span class="flow-arrow">→</span>
+            <a href="/quotes" class="flow-card">
+                <span class="flow-step">3</span>
+                <span class="flow-title">Past Quotes</span>
+                <span class="flow-desc">Reopen and edit saved quotes, print the quotation, or
+                    export the Excel costing sheet.</span>
+                <span class="flow-cta">View quotes →</span>
+            </a>
         </div>
         {% endblock %}
     </main>

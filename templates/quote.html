@@ -1,0 +1,335 @@
+{% extends "base.html" %}
+
+{% block header_nav %}
+<a href="/quotes" class="back-link">← All quotes</a>
+{% endblock %}
+
+{% block content %}
+{% set quote_no = batch.quote_no or '%06d' % batch.id %}
+{% set quote_date = (batch.finalized_at or batch.created_at).strftime('%d/%m/%Y') %}
+
+<!-- ── Screen UI (hidden when printing) ─────────────────────────── -->
+<div class="review-page quote-screen">
+
+  <p class="eyebrow">Quote{% if batch.status == 'final' %} · Final{% else %} · Draft{% endif %}</p>
+  <h1 class="review-title">{{ batch.name or 'Quote ' ~ batch.id }}</h1>
+
+  {% if not lines %}
+  <p class="review-subtext">No parts have been priced yet —
+    {% if batch.nest_id %}
+    <a href="{{ '/price/' ~ batch.nest_id ~ '/1' if batch.part_count else '/match/' ~ batch.nest_id }}">continue pricing this quote</a>.
+    {% else %}this draft has no nest attached.{% endif %}
+  </p>
+  {% else %}
+  <table>
+    <thead>
+      <tr>
+        <th>Part No</th>
+        <th>Rev</th>
+        <th>Description</th>
+        <th>Material</th>
+        <th style="text-align:right">Qty</th>
+        <th style="text-align:right">Cost / Part</th>
+        <th style="text-align:right">Line Cost</th>
+        <th style="text-align:right">Price ea</th>
+        <th style="text-align:right">With Margin</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for l in lines %}
+      <tr>
+        <td class="cell-mono">{{ l.part_number }}</td>
+        <td class="cell-mono">{{ l.revision or '—' }}</td>
+        <td>{{ l.description or '—' }}</td>
+        <td class="cell-mono">{{ l.material or '—' }}</td>
+        <td class="cell-num">{{ l.quantity }}</td>
+        <td class="cell-num">£{{ '%.2f' | format(l.cost_per_part or 0) }}</td>
+        <td class="cell-num">£{{ '%.2f' | format(l.line_cost or 0) }}</td>
+        <td class="cell-num">£{{ '%.2f' | format(l.price_each or 0) }}</td>
+        <td class="cell-num cell-margin">£{{ '%.2f' | format(l.margin_total or 0) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="totals-bar">
+    <div class="totals-item">
+      <span class="totals-label">Quote Total · Cost</span>
+      <span class="totals-value">£{{ '%.2f' | format(batch.subtotal or 0) }}</span>
+    </div>
+    <div class="totals-item totals-right">
+      <span class="totals-label">NET Total · With Margin</span>
+      <span class="totals-value totals-margin">£{{ '%.2f' | format(batch.total_with_margin or 0) }}</span>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Export-document details: only appear on the exported quotation, not the pricing -->
+  <details class="quote-doc-details">
+    <summary>Quotation document details <span class="qdd-hint">— only used on the exported PDF / Excel, not the pricing</span></summary>
+    <div class="quote-meta-form">
+      <div class="qm-field">
+        <label class="field-label" for="qm-quote-no">Quotation No.</label>
+        <input class="price-input" id="qm-quote-no" type="text"
+               value="{{ batch.quote_no or '' }}" placeholder="e.g. 031815">
+      </div>
+      <div class="qm-field">
+        <label class="field-label" for="qm-customer">Customer</label>
+        <input class="price-input" id="qm-customer" type="text"
+               value="{{ batch.customer or '' }}">
+      </div>
+      <div class="qm-field">
+        <label class="field-label" for="qm-contact">Contact</label>
+        <input class="price-input" id="qm-contact" type="text"
+               value="{{ batch.contact or '' }}">
+      </div>
+      <div class="qm-field">
+        <label class="field-label" for="qm-raised-by">Quote Raised By</label>
+        <input class="price-input" id="qm-raised-by" type="text"
+               value="{{ batch.raised_by or '' }}">
+      </div>
+      <div class="qm-field qm-notes">
+        <label class="field-label" for="qm-notes">General Notes</label>
+        <input class="price-input" id="qm-notes" type="text"
+               value="{{ batch.notes or '' }}">
+      </div>
+      <div class="qm-field qm-save">
+        <button class="btn-save" id="qm-save-btn" onclick="saveMeta()">Save details</button>
+      </div>
+    </div>
+  </details>
+
+  <div class="review-actions quote-actions">
+    <div class="quote-export-btns">
+      <a href="/quotes" class="btn-back">← All quotes</a>
+      {% if batch.nest_id %}
+      <a href="{{ '/price/' ~ batch.nest_id ~ '/review' if batch.part_count else '/match/' ~ batch.nest_id }}"
+         class="btn-back">Edit quote</a>
+      {% endif %}
+      <button class="btn-back" onclick="deleteQuote()">Delete</button>
+    </div>
+    {% if lines %}
+    <div class="quote-export-btns">
+      <a href="/quotes/{{ batch.id }}/export.csv"  class="btn-back">Export CSV</a>
+      <a href="/quotes/{{ batch.id }}/export.xlsx" class="btn-back">Export Excel</a>
+      <button class="btn-generate" onclick="window.print()">Print / PDF</button>
+    </div>
+    {% endif %}
+  </div>
+
+</div>
+
+<!-- ── JMS quotation document (print only) ──────────────────────── -->
+<div class="jms-doc">
+
+  <div class="jms-header">
+    <img class="jms-logo" src="/static/logo.jpg" alt="JMS Metaltec">
+    <div class="jms-address">
+      <strong>JMS Metaltec</strong><br>
+      2 Tamlaght Road<br>
+      Kilrea, Coleraine<br>
+      N. Ireland<br>
+      BT51 5UL
+    </div>
+    <div class="jms-contacts">
+      Tel:&nbsp; 028 2954 0864<br>
+      www.jmsmetaltec.com<br>
+      info@jmsmetaltec.com
+    </div>
+  </div>
+
+  <div class="jms-banner">Quotation No. {{ quote_no }}</div>
+
+  <div class="jms-meta">
+    <div><span class="jms-meta-label">Customer</span>{{ batch.customer or '' }}</div>
+    <div><span class="jms-meta-label">Contact</span>{{ batch.contact or '' }}</div>
+    <div><span class="jms-meta-label">Quote Raised By</span>{{ batch.raised_by or '' }}</div>
+    <div><span class="jms-meta-label">Date</span>{{ quote_date }}</div>
+  </div>
+
+  <table class="jms-table">
+    <thead>
+      <tr>
+        <th>Line</th>
+        <th>Part Ref</th>
+        <th>Description</th>
+        <th>Drawing No.</th>
+        <th class="jms-c">Rev No.</th>
+        <th class="jms-c">Qty.</th>
+        <th class="jms-r">Price</th>
+        <th class="jms-r">Subtotal</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for l in lines %}
+      <tr>
+        <td>{{ loop.index }}.</td>
+        <td>{{ l.part_number }}</td>
+        <td>{{ l.description or '' }}</td>
+        <td>{{ l.part_number }}</td>
+        <td class="jms-c">{{ l.revision or '—' }}</td>
+        <td class="jms-c">{{ l.quantity }}</td>
+        <td class="jms-r">£{{ '%.2f' | format(l.price_each or 0) }} ea</td>
+        <td class="jms-r">£{{ '%.2f' | format(l.margin_total or 0) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="jms-notes">
+    <strong>General Notes:</strong>
+    {% if batch.notes %}<p>{{ batch.notes }}</p>{% endif %}
+  </div>
+
+  <div class="jms-total-row">
+    <div class="jms-total-box">
+      <span class="jms-total-label">NET Total:</span>
+      <span class="jms-total-value">£{{ '%.2f' | format(batch.total_with_margin or 0) }}</span>
+    </div>
+  </div>
+
+  <p class="jms-smallprint">
+    All prices quoted are ex-works unless otherwise stated. Prices are based on being
+    supplied electronic CAD data. Our Terms &amp; Conditions of Business apply to this
+    quotation, a copy of which are available upon request.
+  </p>
+
+  <div class="jms-footer">
+    JMS Metaltec &nbsp;·&nbsp; VAT No. 264094205 &nbsp;·&nbsp; Registration No. NI626389
+  </div>
+
+</div>
+
+<style>
+  .quote-export-btns { display: flex; gap: 12px; align-items: center; }
+
+  .quote-doc-details {
+    margin: 4px 0 24px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    padding: 10px 14px;
+  }
+  .quote-doc-details summary {
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--steel);
+  }
+  .quote-doc-details summary:hover { color: var(--blue); }
+  .qdd-hint { text-transform: none; letter-spacing: .02em; color: var(--steel-2); }
+
+  .quote-meta-form {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px 16px;
+    margin-top: 14px;
+    align-items: end;
+  }
+  .qm-notes { grid-column: 1 / 4; }
+  .qm-save  { grid-column: 4; text-align: right; }
+  .qm-save .btn-save { padding: 8px 16px; }
+
+  .jms-doc { display: none; }
+
+  @media print {
+    header, .quote-screen { display: none !important; }
+    body, main.app { background: #fff !important; color: #000 !important;
+                     padding: 0 !important; margin: 0 !important; }
+
+    .jms-doc {
+      display: block;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 10.5pt;
+      color: #000;
+      padding: 6mm 4mm;
+    }
+
+    .jms-header { display: flex; align-items: flex-start; gap: 24px; }
+    .jms-logo { width: 175px; height: auto; }
+    .jms-address { flex: 1; font-size: 9pt; line-height: 1.5; }
+    .jms-contacts { text-align: right; font-size: 9.5pt; line-height: 1.7; }
+
+    .jms-banner {
+      margin-top: 24px;
+      border: 1px solid #888;
+      background: #e8e8e8;
+      padding: 6px 10px;
+      font-size: 13pt;
+      font-weight: bold;
+      color: #444;
+    }
+
+    .jms-meta { display: flex; margin-top: 28px; }
+    .jms-meta > div { flex: 1; }
+    .jms-meta-label { display: block; font-weight: bold; margin-bottom: 3px; }
+
+    .jms-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    .jms-table th {
+      text-align: left; font-weight: bold; font-size: 10.5pt;
+      border-bottom: 1.5px solid #000; padding: 5px 6px;
+      background: none; color: #000; text-transform: none; letter-spacing: 0;
+    }
+    .jms-table td {
+      padding: 7px 6px; border-bottom: 0.5px solid #999;
+      font-size: 10pt; vertical-align: top; background: none; color: #000;
+    }
+    .jms-c { text-align: center !important; }
+    .jms-r { text-align: right  !important; }
+
+    .jms-notes { margin-top: 28px; }
+    .jms-notes p { margin: 6px 0 0; }
+
+    .jms-total-row { display: flex; justify-content: flex-end; margin-top: 14px; }
+    .jms-total-box {
+      display: flex; align-items: center;
+      border: 1px solid #888; background: #e8e8e8; padding: 8px 12px;
+      min-width: 260px; justify-content: space-between;
+    }
+    .jms-total-label { font-weight: bold; }
+    .jms-total-value {
+      background: #fff; border: 1px solid #888;
+      padding: 4px 14px; margin-left: 18px; min-width: 90px; text-align: right;
+    }
+
+    .jms-smallprint { margin-top: 48px; font-size: 7.5pt; line-height: 1.5; color: #222; }
+    .jms-footer { margin-top: 36px; font-size: 7.5pt; font-weight: bold; }
+  }
+</style>
+
+<script>
+  async function saveMeta() {
+    const btn = document.getElementById('qm-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch('/quotes/{{ batch.id }}/meta', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          quote_no:  document.getElementById('qm-quote-no').value,
+          customer:  document.getElementById('qm-customer').value,
+          contact:   document.getElementById('qm-contact').value,
+          raised_by: document.getElementById('qm-raised-by').value,
+          notes:     document.getElementById('qm-notes').value,
+        }),
+      });
+      const r = await res.json();
+      if (r.ok) window.location.reload();
+      else throw new Error();
+    } catch {
+      btn.disabled = false; btn.textContent = 'Error — try again';
+    }
+  }
+
+  async function deleteQuote() {
+    if (!confirm('Delete this quote? This cannot be undone.')) return;
+    try {
+      const res = await fetch('/quotes/{{ batch.id }}/delete', { method: 'POST' });
+      const r   = await res.json();
+      if (r.ok) window.location.href = '/quotes';
+      else alert('Delete failed.');
+    } catch { alert('Delete failed.'); }
+  }
+</script>
+{% endblock %}

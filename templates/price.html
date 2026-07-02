@@ -263,6 +263,8 @@
         <span class="psb-value psb-margin" id="disp-margin">—</span>
       </div>
       <div class="psb-status" id="disp-status">—</div>
+      <div class="ps-note" id="history-note"
+           style="display:none;padding:10px 12px 0;text-align:center"></div>
     </div>
 
   </div><!-- /price-cards-area -->
@@ -325,11 +327,21 @@ const DEFAULTS = {
   machine_time_mins:  0, assembly_time_mins: 0,
 };
 
+// Saved quote line from the DB (null if this part was never saved) —
+// used as fallback so saved/draft quotes can be reopened and edited.
+const SAVED = {{ saved_state | tojson }};
+
+let prefilledFromHistory = false;
+
 let state = (() => {
   try {
     const raw = sessionStorage.getItem(SESSION_KEY);
-    return raw ? JSON.parse(raw) : { ...DEFAULTS };
-  } catch { return { ...DEFAULTS }; }
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  const saved = Object.fromEntries(
+    Object.entries(SAVED || {}).filter(([, v]) => v != null));
+  prefilledFromHistory = SAVED?.prefill_source === 'history';
+  return { ...DEFAULTS, ...saved };
 })();
 
 // ── Card navigation ──────────────────────────────────────
@@ -434,6 +446,13 @@ function initForm() {
   if (S.bending && S.bendCount > 0) {
     const el = document.getElementById('bend-source');
     if (el) el.style.display = 'inline';
+  }
+
+  if (prefilledFromHistory) {
+    const note = document.getElementById('history-note');
+    note.textContent = 'Prefilled from last quote of this part'
+      + (SAVED.prefill_date ? ' (' + SAVED.prefill_date + ')' : '');
+    note.style.display = 'block';
   }
 
   recalculate();
