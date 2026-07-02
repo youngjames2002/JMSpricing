@@ -38,6 +38,51 @@
 
 </div>
 
+<!-- ── Confirm-final popup ─────────────────────────────── -->
+<div class="confirm-overlay" id="confirm-overlay" style="display:none">
+  <div class="confirm-box">
+    <p class="eyebrow">Confirm quote</p>
+    <h2 class="confirm-title">Save these prices as final?</h2>
+    <div class="confirm-summary" id="confirm-summary"></div>
+    <p class="confirm-note">The quote can still be edited and re-generated afterwards.</p>
+    <div class="confirm-actions">
+      <button class="btn-back" onclick="closeConfirm()">Cancel</button>
+      <button class="btn-generate" id="btn-confirm-save">Confirm — save as final</button>
+    </div>
+  </div>
+</div>
+
+<style>
+  .confirm-overlay {
+    position: fixed; inset: 0;
+    background: rgba(16, 32, 64, .45);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .confirm-box {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    padding: 28px 32px;
+    width: 460px;
+    box-shadow: 0 12px 40px rgba(16, 32, 64, .25);
+  }
+  .confirm-title {
+    font-family: var(--sans); font-size: 20px; font-weight: 700;
+    text-transform: none; letter-spacing: 0; color: var(--ink);
+    margin: 4px 0 16px;
+  }
+  .confirm-summary { display: flex; flex-direction: column; gap: 8px; }
+  .confirm-row { display: flex; justify-content: space-between; font-size: 14px; }
+  .confirm-row .cr-value { font-family: var(--mono); font-weight: 600; }
+  .confirm-row-total { border-top: 1px solid var(--line); padding-top: 8px; font-size: 15px; }
+  .confirm-row-total .cr-value { color: var(--blue-dark); font-size: 16px; }
+  .confirm-warn { color: #c0392b; font-size: 13px; margin: 10px 0 0; }
+  .confirm-note { font-size: 12px; color: var(--steel); margin: 14px 0 0; }
+  .confirm-actions {
+    display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px;
+  }
+</style>
+
 <script>
 const NEST_ID = {{ nest_id }};
 const PARTS   = {{ parts | tojson }};
@@ -98,9 +143,43 @@ function render() {
     </div>`;
 }
 
-document.getElementById('btn-generate').addEventListener('click', async () => {
+function fmtRow(label, value, cls = '') {
+  return `<div class="confirm-row ${cls}"><span>${label}</span><span class="cr-value">${value}</span></div>`;
+}
+
+document.getElementById('btn-generate').addEventListener('click', () => {
+  const all        = loadAll();
+  const complete   = all.filter(p => p.complete).length;
+  const incomplete = all.length - complete;
+  let totCost = 0, totMargin = 0;
+  all.forEach(p => {
+    if (p.total_cost   != null) totCost   += p.total_cost;
+    if (p.margin_total != null) totMargin += p.margin_total;
+  });
+
+  document.getElementById('confirm-summary').innerHTML =
+    fmtRow('Parts', all.length) +
+    fmtRow('Priced', complete) +
+    fmtRow('Quote total · cost', fmt(totCost)) +
+    fmtRow('NET total · with margin', fmt(totMargin), 'confirm-row-total') +
+    (incomplete
+      ? `<p class="confirm-warn">⚠ ${incomplete} part${incomplete > 1 ? 's are' : ' is'} incomplete
+         (no material cost) and will be saved as-is.</p>`
+      : '');
+  document.getElementById('confirm-overlay').style.display = 'flex';
+});
+
+function closeConfirm() {
+  document.getElementById('confirm-overlay').style.display = 'none';
+}
+
+document.getElementById('confirm-overlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeConfirm();
+});
+
+document.getElementById('btn-confirm-save').addEventListener('click', async () => {
   const all = loadAll();
-  const btn = document.getElementById('btn-generate');
+  const btn = document.getElementById('btn-confirm-save');
   btn.disabled    = true;
   btn.textContent = 'Saving…';
   try {

@@ -50,6 +50,9 @@ main.app { flex: 1; }
 }
 .back-link:hover { color: var(--blue); }
 
+.header-home { text-decoration: none; }
+.header-home:hover h1 { color: var(--blue); }
+
 header h1 {
   margin: 0;
   font-family: var(--mono);

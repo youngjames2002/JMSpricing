@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% block header_nav %}<a href="/" class="back-link">&#8592; Home</a>{% endblock %}
 {% block content %}
 
 {%- macro p(v) -%}{{ '£%.2f' % v if v is not none else '—' }}{%- endmacro -%}
