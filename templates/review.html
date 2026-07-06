@@ -83,9 +83,12 @@
   }
 </style>
 
+<script type="application/json" id="review-data">{"nestId": {{ nest_id }}, "parts": {{ parts | tojson }}}</script>
+
 <script>
-const NEST_ID = {{ nest_id }};
-const PARTS   = {{ parts | tojson }};
+const REVIEW_DATA = JSON.parse(document.getElementById('review-data').textContent);
+const NEST_ID = REVIEW_DATA.nestId;
+const PARTS   = REVIEW_DATA.parts;
 
 function loadAll() {
   return PARTS.map((p, i) => {

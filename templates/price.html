@@ -293,21 +293,24 @@
   </button>
 </div>
 
+<script type="application/json" id="price-data">{
+  "nestId":      {{ nest_id }},
+  "partIndex":   {{ part_index }},
+  "totalParts":  {{ total_parts }},
+  "nestPartId":  {{ part.id }},
+  "qty":         {{ part.total_qty or 1 }},
+  "sizeX":       {{ part.size_x_mm or 0 }},
+  "sizeY":       {{ part.size_y_mm or 0 }},
+  "processSecs": {{ part.process_time_seconds or 0 }},
+  "matCost":     {{ material_cost | tojson }},
+  "bendCount":   {{ part.bend_count or 0 }},
+  "bending":     {{ 'true' if part.bending_required else 'false' }},
+  "saved":       {{ saved_state | tojson }}
+}</script>
+
 <script>
-const SESSION_KEY = 'quote_{{ nest_id }}_{{ part_index }}';
-const S = {
-  nestId:      {{ nest_id }},
-  partIndex:   {{ part_index }},
-  totalParts:  {{ total_parts }},
-  nestPartId:  {{ part.id }},
-  qty:         {{ part.total_qty or 1 }},
-  sizeX:       {{ part.size_x_mm or 0 }},
-  sizeY:       {{ part.size_y_mm or 0 }},
-  processSecs: {{ part.process_time_seconds or 0 }},
-  matCost:     {{ material_cost | tojson }},
-  bendCount:   {{ part.bend_count or 0 }},
-  bending:     {{ 'true' if part.bending_required else 'false' }},
-};
+const S = JSON.parse(document.getElementById('price-data').textContent);
+const SESSION_KEY = 'quote_' + S.nestId + '_' + S.partIndex;
 
 const DEFAULTS = {
   material_cost_m2:   S.matCost,
@@ -329,7 +332,7 @@ const DEFAULTS = {
 
 // Saved quote line from the DB (null if this part was never saved) —
 // used as fallback so saved/draft quotes can be reopened and edited.
-const SAVED = {{ saved_state | tojson }};
+const SAVED = S.saved;
 
 let prefilledFromHistory = false;
 

@@ -298,12 +298,16 @@
   }
 </style>
 
+<script type="application/json" id="quote-data">{"batchId": {{ batch.id }}}</script>
+
 <script>
+  const BATCH_ID = JSON.parse(document.getElementById('quote-data').textContent).batchId;
+
   async function saveMeta() {
     const btn = document.getElementById('qm-save-btn');
     btn.disabled = true; btn.textContent = 'Saving…';
     try {
-      const res = await fetch('/quotes/{{ batch.id }}/meta', {
+      const res = await fetch('/quotes/' + BATCH_ID + '/meta', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -325,7 +329,7 @@
   async function deleteQuote() {
     if (!confirm('Delete this quote? This cannot be undone.')) return;
     try {
-      const res = await fetch('/quotes/{{ batch.id }}/delete', { method: 'POST' });
+      const res = await fetch('/quotes/' + BATCH_ID + '/delete', { method: 'POST' });
       const r   = await res.json();
       if (r.ok) window.location.href = '/quotes';
       else alert('Delete failed.');
