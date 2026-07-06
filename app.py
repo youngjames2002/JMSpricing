@@ -90,12 +90,12 @@ def render_pdf_preview(pdf_path: Path, dpi: int = 150) -> Path | None:
 
 @app.get("/")
 async def home(request: Request):
-    return templates.TemplateResponse("base.html", {"request": request})
+    return templates.TemplateResponse(request, "base.html")
 
 
 @app.get("/upload")
 async def upload(request: Request):
-    return templates.TemplateResponse("upload.html", {"request": request})
+    return templates.TemplateResponse(request, "upload.html")
 
 
 @app.post("/upload")
@@ -236,8 +236,7 @@ async def match_review(request: Request, nest_id: int):
         "not_priced":       sum(1 for p in matched_parts if not p["has_pricing"]),
     }
 
-    return templates.TemplateResponse("match.html", {
-        "request":            request,
+    return templates.TemplateResponse(request, "match.html", {
         "nest_id":            nest_id,
         "parts":              matched_parts,
         "unmatched_drawings": unmatched_drawings,
@@ -510,8 +509,8 @@ async def price_review(request: Request, nest_id: int):
         p["saved"] = state
 
     cur.close(); conn.close()
-    return templates.TemplateResponse("review.html", {
-        "request": request, "nest_id": nest_id, "parts": parts,
+    return templates.TemplateResponse(request, "review.html", {
+        "nest_id": nest_id, "parts": parts,
     })
 
 
@@ -764,8 +763,7 @@ async def price_part(request: Request, nest_id: int, part_index: int):
         if (BASE_DIR / png_rel).exists():
             drawing_image_url = "/" + png_rel
 
-    return templates.TemplateResponse("price.html", {
-        "request":           request,
+    return templates.TemplateResponse(request, "price.html", {
         "nest_id":           nest_id,
         "part_index":        part_index,
         "total_parts":       len(all_parts),
@@ -788,7 +786,7 @@ async def rates(request: Request):
     rates_rows = cur.fetchall()
     cur.close()
     conn.close()
-    return templates.TemplateResponse("index.html", {"request": request, "materials": mat_rows, "burden_rates": rates_rows})
+    return templates.TemplateResponse(request, "index.html", {"materials": mat_rows, "burden_rates": rates_rows})
 
 
 @app.post("/materials/{material_id}/select")
@@ -945,7 +943,7 @@ async def quotes_list(request: Request):
     """)
     batches = cur.fetchall()
     cur.close(); conn.close()
-    return templates.TemplateResponse("quotes.html", {"request": request, "batches": batches})
+    return templates.TemplateResponse(request, "quotes.html", {"batches": batches})
 
 
 @app.post("/quotes/{batch_id}/delete")
@@ -967,8 +965,8 @@ async def quote_detail(request: Request, batch_id: int):
     batch, lines = fetch_quote_batch(batch_id)
     if not batch:
         return JSONResponse({"error": "Not found"}, status_code=404)
-    return templates.TemplateResponse("quote.html", {
-        "request": request, "batch": batch, "lines": lines,
+    return templates.TemplateResponse(request, "quote.html", {
+        "batch": batch, "lines": lines,
     })
 
 
