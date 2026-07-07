@@ -34,12 +34,97 @@ def _clean(s: str) -> str:
 # Title block extractor
 # ---------------------------------------------------------------------------
 
+def _extract_title_block_redrock(text: str) -> Optional[dict]:
+    """
+    Redrock Machinery title block. Layout (single line, columns interleaved
+    with garbled boilerplate from the notes column):
+
+        DRAWING NO. MASS QTY. / MC CHECKED BY UNLESS OTHERWISE ... MATERIAL
+        300611-03 22.03 kg 1 <garble> COARSE W.MCC 12/11/2020 8mm Mild Steel
+
+    Returns None if the sheet is not a Redrock drawing, so the caller falls
+    through to the other formats.
+    """
+    if not re.search(r"\bREDROCK\b", text, re.I):
+        return None
+
+    tb: dict = {}
+
+    # --- Main title row: part number, mass, qty, drawn by/date, thickness, material ---
+    m = re.search(
+        r"^([A-Z0-9][A-Z0-9\-]+)\s+([\d.]+)\s*kg\s+(\d+)\b.*?"
+        r"(?:([A-Za-z][\w.']{0,15})\s+)?(\d{2}/\d{2}/\d{4})\s+"
+        r"([\d.]+)\s*mm\s+(.+?)\s*$",
+        text, re.I | re.M,
+    )
+    if m:
+        tb["part_number"]     = m.group(1)
+        tb["mass_kg"]         = float(m.group(2))
+        tb["qty_per_machine"] = int(m.group(3))
+        # "COARSE" is trailing tolerance-note garble, not a person
+        if m.group(4) and m.group(4).upper() != "COARSE":
+            tb["drawn_by"] = m.group(4)
+        tb["drawn_date"]   = m.group(5)
+        tb["thickness_mm"] = float(m.group(6))
+        tb["material"]     = _clean(m.group(7))
+    else:
+        # Fallback: "Drawing No. Revision Sheet" box in the top-right corner
+        m = re.search(
+            r"Drawing\s+No\.?\s+Revision\s+Sheet\s*\n\s*([A-Z0-9][A-Z0-9\-]+)",
+            text, re.I,
+        )
+        if not m:
+            return None
+        tb["part_number"] = m.group(1)
+
+    # --- Revision: latest row of the REVISIONS table ---
+    # e.g. "A Gearbox holes changed from 20mm to 18mm 05/07/2023 W McC"
+    if re.search(r"^\s*REVISIONS\s*$", text, re.I | re.M):
+        revs = re.findall(r"^\s*([A-Z])\s+(?:.*?\s)?\d{2}/\d{2}/\d{4}\b", text, re.M)
+        if revs:
+            tb["revision"] = max(revs)
+
+    # --- Description: value line(s) below the "TITLE / DESCRIPTION" header,
+    # with the paint column and tolerance-table garble appended ---
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if not re.search(r"TITLE\s*/\s*DESCRIPTION", line, re.I):
+            continue
+        for cand_line in lines[i + 1:i + 5]:
+            cand = re.split(
+                r"\s+(?:NO\s+PAINT\b|PAINT\b|OVER\s+\d)", cand_line, maxsplit=1
+            )[0].strip()
+            if not cand or re.match(r"^(OVER|ALL\b|Reproduction|prohibited)", cand, re.I):
+                continue
+            if len(cand) >= 3 and re.search(r"[A-Za-z]", cand):
+                tb["description"] = _clean(cand)
+                break
+        break
+
+    # --- Paint / coating ---
+    if re.search(r"NO\s+PAINT", text, re.I):
+        tb["finish"] = "NO PAINT"
+
+    # --- Sheet ---
+    m = re.search(r"\b(\d+)\s+OF\s+(\d+)\b", text)
+    if m:
+        tb["sheet"] = f"{m.group(1)} OF {m.group(2)}"
+
+    return tb
+
+
 def _extract_title_block(page) -> dict:
     """
     Extract title block fields. Uses precise line-pattern matching for the
-    Wrightbus/Glovebox format, with generic fallbacks for other formats.
+    Redrock and Wrightbus/Glovebox formats, with generic fallbacks for
+    other formats.
     """
     text = page.extract_text() or ""
+
+    redrock = _extract_title_block_redrock(text)
+    if redrock is not None:
+        return redrock
+
     tb: dict = {}
 
     # --- Part number + revision + status (Wrightbus/Glovebox) ---
@@ -198,6 +283,9 @@ def _extract_title_block(page) -> dict:
 # ---------------------------------------------------------------------------
 
 _ANGLE_RE   = re.compile(r"(\d+(?:\.\d+)?)°")
+# Redrock bend callouts: "FOLD UP 15o" / "FOLD DOWN 48°" (degree sign is
+# sometimes extracted as a letter "o")
+_FOLD_RE    = re.compile(r"FOLD\s+(?:UP|DOWN)\s+(\d+(?:\.\d+)?)", re.I)
 _SLOT_RE    = re.compile(r"(\d+(?:\.\d+)?)\s*MM\s+SLOT", re.I)
 _HOLE_RE    = re.compile(r"[ØΦ∅](\d+(?:\.\d+)?)")
 _RADIUS_RE  = re.compile(r"R(\d+(?:\.\d+)?)\s*(?:TYP)?", re.I)
@@ -210,6 +298,10 @@ _TB_NOISE_PHRASES = (
     "FORMAT NAME", "DRAWING SIZE", "DO NOT SCALE", "NORTHERN IRELAND",
     "ALL DIMENSIONS", "ESTIMATED MASS", "SOURCING", "COMPLY WITH",
     "BURRS", "SHARP EDGES", "ELECTRONIC", "Scott Logan",
+    # Redrock boilerplate (tolerance table, address block, copyright)
+    "REDROCK", "Redrock", "TOLERANCES (DIN", "UP TO", "PAINT / COATING",
+    "DRAWING NO. MASS", "Reproduction in part", "prohibited",
+    "www.redrockmachinery", "Collone", "Co.Armagh", "THIRD ANGLE",
 )
 
 
@@ -234,7 +326,10 @@ def _extract_pricing_factors(page, tb_top_y: float) -> dict:
     factors: dict = {}
 
     # --- Bend angles ---
-    all_angle_strs = _ANGLE_RE.findall(drawing_text)
+    # Explicit fold callouts first (Redrock), then strip them so the generic
+    # degree-symbol pattern doesn't count the same callout twice.
+    fold_angle_strs = _FOLD_RE.findall(drawing_text)
+    all_angle_strs  = _ANGLE_RE.findall(_FOLD_RE.sub(" ", drawing_text))
     angle_counts: dict[float, int] = {}
     for a in all_angle_strs:
         angle_counts[float(a)] = angle_counts.get(float(a), 0) + 1
@@ -244,10 +339,10 @@ def _extract_pricing_factors(page, tb_top_y: float) -> dict:
     bend_angles = sorted(set(
         float(a) for a in all_angle_strs
         if not (float(a) == 90.0 and "90.00" in drawing_text and angle_counts.get(90.0, 0) <= 1)
-    ))
+    ) | set(float(a) for a in fold_angle_strs))
     if bend_angles:
         factors["bend_angles_deg"] = bend_angles
-        factors["bend_count"]      = len(all_angle_strs)
+        factors["bend_count"]      = len(all_angle_strs) + len(fold_angle_strs)
         factors["bending_required"] = True
     else:
         factors["bending_required"] = False
@@ -293,6 +388,7 @@ def _extract_pricing_factors(page, tb_top_y: float) -> dict:
     notes = []
     note_patterns = [
         r"ALL\s+BURRS?\s+AND\s+SHARP\s+EDGES?\s+TO\s+BE\s+REMOVED",
+        r"REMOVE\s+ALL\s+BURRS?\s*&?\s*(?:AND\s+)?SHARP\s+EDGES?",
         r"DEBURR\s+ALL\s+EDGES?",
         r"BREAK\s+ALL\s+SHARP\s+EDGES?",
         r"COUNTERSINK",
@@ -302,7 +398,8 @@ def _extract_pricing_factors(page, tb_top_y: float) -> dict:
         r"PRESS\s+FIT",
         r"POWDER\s+COAT",
         r"ANODIS(?:E|ED)",
-        r"PAINT(?:ED)?",
+        # not "NO PAINT" and not the "PAINT / COATING" column header
+        r"(?<!NO )\bPAINT(?:ED)?\b(?!\s*/\s*COATING)",
         r"ZINC\s+PLAT(?:E|ED)",
         r"SEE\s+DXF\s+FOR\s+CUT\s+PROFILE",
         r"MUST\s+COMPLY\s+WITH\s+[\w-]+",

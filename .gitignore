@@ -7,3 +7,4 @@ migrations/001_quote_batches.sql
 .gitignore
 migrations/002_nest_parts_unique.sql
 migrations/003_quote_doc_fields.sql
+test_readDrawings.py
