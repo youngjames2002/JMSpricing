@@ -1,23 +1,34 @@
 """
-drawing_parser.py
+readDrawings.py
 
 Parse engineering drawing PDFs and extract pricing-relevant data.
 
-Works across different title block formats by using line-pattern matching
-with multiple regex fallbacks. No external API calls required.
+Known title block layouts (Redrock, Wrightbus, Groundsman/SolidWorks) are
+parsed with line-pattern regexes — fast and free. Pages in an unrecognised
+format, pages where the regex extraction comes back too sparse to price
+from, and scanned pages with no text layer fall back to the Claude API
+(claudeExtractor.py, vision-based). If the fallback is unavailable or
+fails, the parser degrades to best-effort generic regexes.
+
+Each parsed page carries an "extraction_method" field so downstream
+pricing can tell a precise format match from a model read or a generic
+regex guess.
 
 Public API:
-    parse_drawing_pdf(path: str) -> dict
+    parse_drawing_pdf(path: str, use_claude: bool = True) -> dict
 
 Dependencies:
-    pip install pdfplumber
+    pip install pdfplumber          # regex path
+    pip install anthropic pymupdf python-dotenv   # Claude fallback
+    ANTHROPIC_API_KEY in project/.env             # Claude fallback
 """
 
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import pdfplumber
 
@@ -31,10 +42,10 @@ def _clean(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Title block extractor
+# Title block extractors — one per known layout
 # ---------------------------------------------------------------------------
 
-def _extract_title_block_redrock(text: str) -> Optional[dict]:
+def _extract_title_block_redrock(text: str, page=None) -> Optional[dict]:
     """
     Redrock Machinery title block. Layout (single line, columns interleaved
     with garbled boilerplate from the notes column):
@@ -42,12 +53,9 @@ def _extract_title_block_redrock(text: str) -> Optional[dict]:
         DRAWING NO. MASS QTY. / MC CHECKED BY UNLESS OTHERWISE ... MATERIAL
         300611-03 22.03 kg 1 <garble> COARSE W.MCC 12/11/2020 8mm Mild Steel
 
-    Returns None if the sheet is not a Redrock drawing, so the caller falls
-    through to the other formats.
+    Returns None if the expected patterns are absent, so the caller falls
+    through to the Claude fallback.
     """
-    if not re.search(r"\bREDROCK\b", text, re.I):
-        return None
-
     tb: dict = {}
 
     # --- Main title row: part number, mass, qty, drawn by/date, thickness, material ---
@@ -113,18 +121,110 @@ def _extract_title_block_redrock(text: str) -> Optional[dict]:
     return tb
 
 
-def _extract_title_block(page) -> dict:
+def _extract_title_block_groundsman(text: str, page=None) -> Optional[dict]:
     """
-    Extract title block fields. Uses precise line-pattern matching for the
-    Redrock and Wrightbus/Glovebox formats, with generic fallbacks for
-    other formats.
+    Groundsman Industries (SolidWorks sheet format) title block. pdfplumber
+    merges each row's label and value onto one line, and the TITLE box text
+    lands on the same line as the MATERIAL row:
+
+        DRAWN BY : B Warke DO NOT SCALE DRAWING REVISION: 1
+        FRACTIONAL DATE CREATED : 29/07/2014
+        TWO PLACE DECIMAL CHECKED: 26/05/2026
+        MATERIAL: MSteel Dpth Stop Washer     <- material + TITLE box text
+        THICKNESS: 4mm
+        COMMENTS: DWG NO.
+        LC_TMC26_022W A2
+        SCALE:1:1 SHEET 1 OF 1
+
+    The material/title split uses word x-positions (the TITLE: label marks
+    the title column's left edge). Returns None if the part number line is
+    absent, so the caller falls through to the Claude fallback.
     """
-    text = page.extract_text() or ""
+    tb: dict = {}
 
-    redrock = _extract_title_block_redrock(text)
-    if redrock is not None:
-        return redrock
+    # --- Part number + sheet size: value line directly above the SCALE row ---
+    m = re.search(
+        r"^\s*([A-Z][A-Z0-9_\-]{3,})\s+(A[0-4])\s*\n\s*SCALE\s*:", text, re.M
+    )
+    if not m:
+        return None
+    tb["part_number"]  = m.group(1)
+    tb["drawing_size"] = m.group(2)
 
+    m = re.search(r"REVISION\s*:\s*([A-Z0-9]+)\s*$", text, re.M)
+    if m:
+        tb["revision"] = m.group(1)
+
+    m = re.search(r"DRAWN\s+BY\s*:\s*(.+?)\s+DO\s+NOT\s+SCALE", text, re.I)
+    if m:
+        tb["drawn_by"] = _clean(m.group(1))
+
+    m = re.search(r"DATE\s+CREATED\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.I)
+    if m:
+        tb["drawn_date"] = m.group(1)
+
+    m = re.search(r"CHECKED\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.I)
+    if m:
+        tb["checked_date"] = m.group(1)
+
+    m = re.search(r"THICKNESS\s*:\s*([\d.]+)\s*mm", text, re.I)
+    if m:
+        tb["thickness_mm"] = float(m.group(1))
+
+    # --- Material / description: the MATERIAL row also carries the TITLE
+    # box text; split the two columns on the TITLE: label's x-position ---
+    m = re.search(r"MATERIAL\s*:\s*(.+)$", text, re.M)
+    if m:
+        material, description = _clean(m.group(1)), None
+        if page is not None:
+            words = page.extract_words()
+            mat_label = next(
+                (w for w in words if w["text"].rstrip(":").upper() == "MATERIAL"), None
+            )
+            title_label = next(
+                (w for w in words if w["text"].rstrip(":").upper() == "TITLE"), None
+            )
+            if mat_label and title_label:
+                row = [
+                    w for w in words
+                    if abs(w["top"] - mat_label["top"]) < 3 and w["x0"] > mat_label["x1"]
+                ]
+                mat_words   = [w["text"] for w in row if w["x0"] <  title_label["x0"] - 2]
+                title_words = [w["text"] for w in row if w["x0"] >= title_label["x0"] - 2]
+                if mat_words:
+                    material = _clean(" ".join(mat_words))
+                if title_words:
+                    description = _clean(" ".join(title_words))
+        tb["material"] = material
+        if description:
+            tb["description"] = description
+
+    m = re.search(r"SCALE\s*:\s*([\d.:]+)", text)
+    if m:
+        try:
+            tb["scale"] = float(m.group(1))
+        except ValueError:
+            tb["scale"] = m.group(1)
+
+    m = re.search(r"SHEET\s+(\d+)\s+OF\s+(\d+)", text, re.I)
+    if m:
+        tb["sheet"] = f"{m.group(1)} OF {m.group(2)}"
+
+    # --- Latest revision change: "1 Pointer dimension 24mm to 29mm 200121 bw" ---
+    m = re.search(r"^\s*[A-Z0-9]{1,2}\s+(.+?)\s+\d{6}\s+\w{1,4}\s*$", text, re.M)
+    if m:
+        tb["latest_change_description"] = _clean(m.group(1))
+
+    return tb
+
+
+def _extract_title_block_generic(text: str, page=None) -> dict:
+    """
+    Wrightbus/Glovebox title block extraction, with generic label-based
+    fallbacks that also cover the Groundsman/SolidWorks sheets. Used for
+    every known non-Redrock format and as the last-resort extractor when
+    the Claude fallback is unavailable.
+    """
     tb: dict = {}
 
     # --- Part number + revision + status (Wrightbus/Glovebox) ---
@@ -279,17 +379,66 @@ def _extract_title_block(page) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Known-format registry
+# ---------------------------------------------------------------------------
+
+def _detect_redrock(text: str) -> bool:
+    return bool(re.search(r"\bREDROCK\b", text, re.I))
+
+
+def _detect_wrightbus(text: str) -> bool:
+    return bool(re.search(
+        r"STATUS\s+PART\s+NUMBER\s+REVISION|make_or_buy|\bWMP-\d", text, re.I
+    ))
+
+
+def _detect_groundsman(text: str) -> bool:
+    # Stock SolidWorks sheet format — detect the company name, or the label
+    # pair the sheet always carries, so unbranded sheets in the same format
+    # still route here.
+    if re.search(r"\bGROUNDSMAN\b", text, re.I):
+        return True
+    return bool(
+        re.search(r"DWG\s+NO\.", text, re.I)
+        and re.search(r"DO\s+NOT\s+SCALE\s+DRAWING\s+REVISION\s*:", text, re.I)
+    )
+
+
+# (name, detector, title-block extractor) — first matching detector wins.
+# Extractors take (text, page); page gives access to word coordinates for
+# layouts where pdfplumber merges columns. To support a new customer
+# format, add an entry here.
+_KNOWN_FORMATS: list[tuple[str, Callable, Callable]] = [
+    ("redrock",    _detect_redrock,    _extract_title_block_redrock),
+    ("wrightbus",  _detect_wrightbus,  _extract_title_block_generic),
+    ("groundsman", _detect_groundsman, _extract_title_block_groundsman),
+]
+
+# A regex extraction is good enough to skip the Claude fallback when it found
+# the part number plus at least two of these. Anything sparser (e.g. a Redrock
+# sheet with a mangled text layer) goes to Claude, because a half-read title
+# block prices the part wrong silently.
+_GATE_WANTED = ("material", "thickness_mm", "description", "revision")
+
+
+def _extraction_acceptable(tb: Optional[dict]) -> bool:
+    if not tb or "part_number" not in tb:
+        return False
+    return sum(f in tb for f in _GATE_WANTED) >= 2
+
+
+# ---------------------------------------------------------------------------
 # Pricing factors extractor
 # ---------------------------------------------------------------------------
 
 _ANGLE_RE   = re.compile(r"(\d+(?:\.\d+)?)°")
-# Redrock bend callouts: "FOLD UP 15o" / "FOLD DOWN 48°" (degree sign is
-# sometimes extracted as a letter "o")
-_FOLD_RE    = re.compile(r"FOLD\s+(?:UP|DOWN)\s+(\d+(?:\.\d+)?)", re.I)
+# Bend callouts: Redrock "FOLD UP 15o" / "FOLD DOWN 48°" (degree sign is
+# sometimes extracted as a letter "o") and SolidWorks/Groundsman
+# "DOWN 40° R 3" / "UP 90° R 2" bend notes
+_FOLD_RE    = re.compile(r"(?:FOLD\s+)?\b(?:UP|DOWN)\s+(\d+(?:\.\d+)?)", re.I)
 _SLOT_RE    = re.compile(r"(\d+(?:\.\d+)?)\s*MM\s+SLOT", re.I)
-_HOLE_RE    = re.compile(r"[ØΦ∅](\d+(?:\.\d+)?)")
+_HOLE_RE    = re.compile(r"[ØΦ∅]")
 _RADIUS_RE  = re.compile(r"R(\d+(?:\.\d+)?)\s*(?:TYP)?", re.I)
-_DIM_RE     = re.compile(r"^(\d+(?:\.\d+)?)$")
 
 _TB_NOISE_PHRASES = (
     "MATERIAL SPECIFICATION", "DRAWN BY", "CHECKED", "REVISION",
@@ -305,18 +454,40 @@ _TB_NOISE_PHRASES = (
 )
 
 
-def _extract_pricing_factors(page, tb_top_y: float) -> dict:
+def _page_has_circular_holes(page) -> bool:
     """
-    Extract bend angles, slots, holes, dimensions and process notes
-    from the drawing area (above the title block).
+    Detect hole presence from vector geometry rather than text. SolidWorks/
+    Groundsman exports draw the diameter symbol as vector artwork rather
+    than an extractable text glyph, so Ø/DIA text matching alone misses
+    every hole on those drawings. A real hole is drawn as a full closed
+    circular curve; SolidWorks also draws a small (~8-9pt) center-mark dot
+    at each hole's centre, excluded here by the width floor.
+
+    Validated against 10 sample Groundsman drawings: every genuine hole
+    produced a closed, square-bbox curve of 22-80pt; parts with no holes
+    produced none (only the smaller center-mark dots, which this filters
+    out). Presence-only — this does not attempt to size or count holes.
     """
-    text = page.extract_text() or ""
-    words = page.extract_words()
+    for c in page.curves:
+        w, h = c.get("width", 0), c.get("height", 0)
+        if w < 15 or h < 15:
+            continue  # center-mark dot or other small artifact, not a hole
+        if abs(w - h) / max(w, h) > 0.1:
+            continue  # not circular
+        pts = c.get("pts") or []
+        if len(pts) < 8:
+            continue
+        if abs(pts[0][0] - pts[-1][0]) > 0.5 or abs(pts[0][1] - pts[-1][1]) > 0.5:
+            continue  # not a closed path
+        return True
+    return False
 
-    # Drawing area words only
-    drawing_words = [w for w in words if w["bottom"] < tb_top_y]
 
-    # Filter text lines to drawing area
+def _extract_pricing_factors(text: str, page) -> dict:
+    """
+    Extract bend angles, slots, hole presence and process notes from the
+    drawing area (title block boilerplate lines filtered out).
+    """
     drawing_lines = [
         line for line in text.split("\n")
         if not any(phrase in line for phrase in _TB_NOISE_PHRASES)
@@ -352,37 +523,18 @@ def _extract_pricing_factors(page, tb_top_y: float) -> dict:
     if slot_matches:
         factors["slots"] = sorted(set(f"{s}MM SLOT" for s in slot_matches))
 
-    # --- Holes / diameters ---
-    holes = sorted(set(float(h) for h in _HOLE_RE.findall(drawing_text)))
-    dia_matches = re.findall(r"(?:DIA\.?|DIAM\.?)\s*([\d.]+)", drawing_text, re.I)
-    holes = sorted(set(holes) | {float(d) for d in dia_matches})
-    if holes:
-        factors["holes_dia_mm"] = holes
+    # --- Holes (presence only — not priced, exact sizes/dimensions not needed) ---
+    # Text-based signal works on formats where the Ø glyph survives extraction
+    # (Redrock/Wrightbus); geometry catches formats where it doesn't (Groundsman).
+    has_hole_text = bool(_HOLE_RE.search(drawing_text)) or bool(
+        re.search(r"(?:DIA\.?|DIAM\.?)\s*[\d.]+", drawing_text, re.I)
+    )
+    factors["holes_present"] = has_hole_text or _page_has_circular_holes(page)
 
     # --- Radii ---
     radii = sorted(set(float(r) for r in _RADIUS_RE.findall(drawing_text)))
     if radii:
         factors["radii_mm"] = radii
-
-    # --- Linear dimensions (best-effort) ---
-    grid_labels = {str(i) for i in range(1, 9)}
-    dim_values: set[float] = set()
-    for w in drawing_words:
-        t = w["text"]
-        if _DIM_RE.match(t) and t not in grid_labels:
-            val = float(t)
-            if val > 1:
-                dim_values.add(val)
-        elif re.match(r"^\d+\.\d+$", t):
-            val = float(t)
-            if val > 1:
-                dim_values.add(val)
-
-    if dim_values:
-        factors["dimensions_mm"] = sorted(dim_values)
-        factors["dimensions_note"] = (
-            "Best-effort extraction — rotated dimension text may be missing or garbled"
-        )
 
     # --- Process / post-processing notes ---
     notes = []
@@ -418,15 +570,17 @@ def _extract_pricing_factors(page, tb_top_y: float) -> dict:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def parse_drawing_pdf(path: str) -> dict:
+def parse_drawing_pdf(path: str, use_claude: bool = True) -> dict:
     """
     Parse an engineering drawing PDF and extract pricing-relevant data.
 
-    Works across different title block formats using pattern matching —
-    no external API calls required.
+    Known formats are parsed with regexes; unrecognised or poorly-extracted
+    pages fall back to the Claude API when use_claude is True and
+    ANTHROPIC_API_KEY is configured.
 
     Args:
         path: Absolute or relative path to the PDF file.
+        use_claude: Allow the Claude vision fallback for unrecognised pages.
 
     Returns:
         {
@@ -434,6 +588,8 @@ def parse_drawing_pdf(path: str) -> dict:
             "pages": [
                 {
                     "page": int,
+                    "extraction_method": "redrock" | "wrightbus" | "groundsman"
+                                         | "claude" | "generic-regex",
                     "title_block": {
                         "part_number": str,
                         "revision": str,
@@ -446,7 +602,7 @@ def parse_drawing_pdf(path: str) -> dict:
                         "drawn_date": str,
                         "checked_by": str,
                         "checked_date": str,
-                        "scale": float,
+                        "scale": float | str,
                         "drawing_size": str,
                         "latest_change_description": str,
                         # fields not found are omitted rather than null
@@ -456,10 +612,8 @@ def parse_drawing_pdf(path: str) -> dict:
                         "bend_angles_deg": [float, ...],   # unique angles present
                         "bend_count": int,                  # total angle callouts (proxy for op count)
                         "slots": ["7MM SLOT", ...],
-                        "holes_dia_mm": [float, ...],
+                        "holes_present": bool,               # for tube routing awareness; not priced
                         "radii_mm": [float, ...],
-                        "dimensions_mm": [float, ...],      # best-effort, may be incomplete
-                        "dimensions_note": str,
                         "process_notes": [str, ...],
                     }
                 }
@@ -478,22 +632,62 @@ def parse_drawing_pdf(path: str) -> dict:
         "pages": [],
     }
 
+    claude_ok = use_claude
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
             text = page.extract_text() or ""
-            if not text.strip():
-                continue
 
-            # Title block starts roughly in the bottom 22% of the page
-            tb_top_y = page.height * 0.78
+            page_result = None
+            method = None
 
-            title_block     = _extract_title_block(page)
-            pricing_factors = _extract_pricing_factors(page, tb_top_y)
+            # 1. Known layouts via regex, gated on extraction quality
+            if text.strip():
+                for fmt_name, detect, extract in _KNOWN_FORMATS:
+                    if detect(text):
+                        tb = extract(text, page)
+                        if _extraction_acceptable(tb):
+                            page_result = {
+                                "title_block":     tb,
+                                "pricing_factors": _extract_pricing_factors(text, page),
+                            }
+                            method = fmt_name
+                        break  # detector matched; don't try other formats
+
+            # 2. Unrecognised format, sparse extraction, or scanned page → Claude
+            if page_result is None and claude_ok:
+                try:
+                    from claudeExtractor import (
+                        ClaudeExtractionError,
+                        extract_page_with_claude,
+                    )
+                except ImportError as e:
+                    print(f"readDrawings: Claude fallback unavailable ({e})",
+                          file=sys.stderr)
+                    claude_ok = False
+                else:
+                    try:
+                        page_result = extract_page_with_claude(pdf_path, i)
+                        method = "claude"
+                    except ClaudeExtractionError as e:
+                        print(f"readDrawings: Claude fallback failed on page "
+                              f"{i + 1} of {pdf_path.name}: {e}", file=sys.stderr)
+                        if e.permanent:
+                            claude_ok = False
+
+            # 3. Last resort: best-effort generic regexes
+            if page_result is None:
+                if not text.strip():
+                    continue  # scanned page and no Claude — nothing to extract
+                page_result = {
+                    "title_block":     _extract_title_block_generic(text),
+                    "pricing_factors": _extract_pricing_factors(text, page),
+                }
+                method = "generic-regex"
 
             result["pages"].append({
-                "page":            i + 1,
-                "title_block":     title_block,
-                "pricing_factors": pricing_factors,
+                "page":              i + 1,
+                "extraction_method": method,
+                **page_result,
             })
 
     return result
@@ -504,12 +698,12 @@ def parse_drawing_pdf(path: str) -> dict:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import sys
     import json
 
-    if len(sys.argv) < 2:
-        print("Usage: python drawing_parser.py <path-to-pdf>")
+    args = [a for a in sys.argv[1:] if a != "--no-claude"]
+    if not args:
+        print("Usage: python readDrawings.py <path-to-pdf> [--no-claude]")
         sys.exit(1)
 
-    result = parse_drawing_pdf(sys.argv[1])
+    result = parse_drawing_pdf(args[0], use_claude="--no-claude" not in sys.argv)
     print(json.dumps(result, indent=2))
