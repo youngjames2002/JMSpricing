@@ -771,10 +771,9 @@ def calculate_price(d: dict, rates: dict) -> dict:
     finish   = f("finish_cost") * rates["finishing_markup"] * qty
     purchase = f("purchased")   * qty
     sticker  = f("sticker_cost",  0.07) * qty
-    delivery = f("delivery_cost", 5.0)  * qty
     misc     = f("misc_cost")           * qty
 
-    total      = laser + fold + tube + weld + saw + machine + assembly + finish + purchase + sticker + delivery + misc
+    total      = laser + fold + tube + weld + saw + machine + assembly + finish + purchase + sticker + misc
     margin_pct = f("margin_pct", 10)
 
     return {
@@ -787,8 +786,7 @@ def calculate_price(d: dict, rates: dict) -> dict:
             "saw":   round(saw, 2),   "machine":  round(machine, 2),
             "assembly": round(assembly, 2),
             "finish":   round(finish, 2),  "purchased": round(purchase, 2),
-            "sticker":  round(sticker, 2), "delivery":  round(delivery, 2),
-            "misc":     round(misc, 2),
+            "sticker":  round(sticker, 2), "misc":      round(misc, 2),
         },
     }
 
@@ -868,7 +866,6 @@ def quote_row_to_state(q: dict) -> dict:
         "purchased":          q.get("purchased_total"),
         "finish_cost":        q.get("finish_cost_per_part"),
         "sticker_cost":       q.get("sticker_cost"),
-        "delivery_cost":      q.get("delivery_cost"),
         "misc_cost":          q.get("misc_cost"),
         "margin_pct":         q.get("margin_pct"),
         "active_processes":   active,
@@ -910,7 +907,7 @@ def price_review(request: Request, nest_id: int):
 
     # Saved lines from the latest batch — fallback for parts the browser has
     # no sessionStorage state for, so editing a saved quote keeps its values.
-    cur.execute("SELECT id FROM quote_batches WHERE nest_id = %s ORDER BY id DESC LIMIT 1",
+    cur.execute("SELECT id, delivery_cost FROM quote_batches WHERE nest_id = %s ORDER BY id DESC LIMIT 1",
                 (nest_id,))
     batch = cur.fetchone()
     saved = {}
@@ -989,6 +986,7 @@ def price_review(request: Request, nest_id: int):
     cur.close(); conn.close()
     return templates.TemplateResponse(request, "review.html", {
         "nest_id": nest_id, "parts": parts, "assemblies": assemblies,
+        "delivery_cost": (batch["delivery_cost"] if batch else 0) or 0,
     })
 
 
@@ -1017,9 +1015,11 @@ def _price_save_sync(nest_id: int, data):
     # part-level and assembly-level pricing.
     if isinstance(data, list):
         parts_data, assy_data = data, []
+        delivery_cost = 0.0
     else:
-        parts_data = data.get("parts") or []
-        assy_data  = data.get("assemblies") or []
+        parts_data    = data.get("parts") or []
+        assy_data     = data.get("assemblies") or []
+        delivery_cost = _opt_num(data.get("delivery_cost")) or 0.0
     conn = get_db()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -1092,7 +1092,7 @@ def _price_save_sync(nest_id: int, data):
             INSERT INTO quotes (
                 quote_batch_id, nest_part_id, burden_rate_id, material_id,
                 quoted_at, quantity,
-                purchased_total, finish_cost_per_part, sticker_cost, delivery_cost,
+                purchased_total, finish_cost_per_part, sticker_cost,
                 misc_cost, margin_pct,
                 material_cost_m2, num_folds, mins_per_fold, fold_setup_mins,
                 tube_active, weld_active, saw_active, machine_active, assembly_active,
@@ -1101,7 +1101,7 @@ def _price_save_sync(nest_id: int, data):
                 machine_time_mins, assembly_time_mins,
                 cost_per_part, line_cost, margin_total, breakdown
             ) VALUES (
-                %s,%s,%s,%s, NOW(),%s, %s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s, NOW(),%s, %s,%s,%s,%s,%s,
                 %s,%s,%s,%s,
                 %s,%s,%s,%s,%s,
                 %s,%s,%s,%s, %s, %s,%s,%s, %s,%s,
@@ -1116,7 +1116,6 @@ def _price_save_sync(nest_id: int, data):
                 purchased_total      = EXCLUDED.purchased_total,
                 finish_cost_per_part = EXCLUDED.finish_cost_per_part,
                 sticker_cost   = EXCLUDED.sticker_cost,
-                delivery_cost  = EXCLUDED.delivery_cost,
                 misc_cost      = EXCLUDED.misc_cost,
                 margin_pct     = EXCLUDED.margin_pct,
                 material_cost_m2 = EXCLUDED.material_cost_m2,
@@ -1146,7 +1145,7 @@ def _price_save_sync(nest_id: int, data):
             batch_id, np_id, rates["id"], material_id,
             qty or 1,
             p.get("purchased", 0), p.get("finish_cost", 0),
-            p.get("sticker_cost", 0.07), p.get("delivery_cost", 5),
+            p.get("sticker_cost", 0.07),
             p.get("misc_cost", 0),       p.get("margin_pct", 10),
             _opt_num(p.get("material_cost_m2")), _opt_num(p.get("num_folds")),
             _opt_num(p.get("mins_per_fold")),    _opt_num(p.get("fold_setup_mins")),
@@ -1238,12 +1237,19 @@ def _price_save_sync(nest_id: int, data):
             psycopg2.extras.Json(own["breakdown"]),
         ))
 
+    # Delivery is one flat charge on the whole quote, passed through at cost
+    # (no margin applied).
+    subtotal   += delivery_cost
+    margin_sum += delivery_cost
+
     wc.execute("""
         UPDATE quote_batches SET
             status = 'final', burden_rate_id = %s, material_id = %s,
+            delivery_cost = %s,
             subtotal = %s, total_with_margin = %s, finalized_at = NOW()
         WHERE id = %s
-    """, (rates["id"], material_id, round(subtotal, 2), round(margin_sum, 2), batch_id))
+    """, (rates["id"], material_id, round(delivery_cost, 2),
+          round(subtotal, 2), round(margin_sum, 2), batch_id))
 
     conn.commit()
     cur.close(); wc.close(); conn.close()
@@ -1693,6 +1699,9 @@ def quote_export_csv(batch_id: int):
     for row in _export_rows(rows):
         w.writerow(row)
     w.writerow([])
+    delivery = batch.get("delivery_cost") or 0
+    if delivery:
+        w.writerow(["Delivery", "", "", "", "", "", "", delivery, delivery, ""])
     w.writerow(["Totals", "", "", "", "", "", "", batch["subtotal"], batch["total_with_margin"], ""])
 
     return Response(buf.getvalue(), media_type="text/csv", headers={
@@ -1712,7 +1721,7 @@ _JMS_PROCESS_ROWS = [
     ("Welding",     ("weld",)),
     ("Assembly",    ("assembly", "fab")),
     ("Finishing",   ("finish",)),
-    ("Misc",        ("misc", "sticker", "delivery", "purchased")),
+    ("Misc",        ("misc", "sticker", "purchased")),
 ]
 
 _GBP_FMT = '"£"#,##0.00'
@@ -1794,6 +1803,12 @@ def quote_export_xlsx(batch_id: int):
         cell.number_format = _GBP_FMT
         r += 1
 
+    # Delivery is a quote-level flat charge, not part of any line breakdown
+    ws.cell(row=r, column=2, value="Delivery")
+    cell = ws.cell(row=r, column=3, value=batch.get("delivery_cost") or 0)
+    cell.number_format = _GBP_FMT
+    r += 1
+
     ws.cell(row=r, column=2, value="Total").font = bold
     c_total = ws.cell(row=r, column=3, value=batch["subtotal"])
     c_total.number_format = _GBP_FMT; c_total.font = bold
@@ -1858,7 +1873,7 @@ def quote_export_xlsx(batch_id: int):
 
     # ── Breakdown sheet — per-part per-process costs ──
     procs = ["laser", "fold", "tube", "weld", "saw", "machine", "assembly",
-             "finish", "purchased", "sticker", "delivery", "misc"]
+             "finish", "purchased", "sticker", "misc"]
     bs = wb.create_sheet("Breakdown")
     bs.append(["Part No", "Material £/m²"] + [p.capitalize() for p in procs] + ["Line Cost"])
     for cell in bs[1]:

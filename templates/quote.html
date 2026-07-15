@@ -77,6 +77,10 @@
       <span class="totals-label">Quote Total · Cost</span>
       <span class="totals-value">£{{ '%.2f' | format(batch.subtotal or 0) }}</span>
     </div>
+    <div class="totals-item">
+      <span class="totals-label">Delivery · Whole Quote</span>
+      <span class="totals-value">£{{ '%.2f' | format(batch.delivery_cost or 0) }}</span>
+    </div>
     <div class="totals-item totals-right">
       <span class="totals-label">NET Total · With Margin</span>
       <span class="totals-value totals-margin">£{{ '%.2f' | format(batch.total_with_margin or 0) }}</span>

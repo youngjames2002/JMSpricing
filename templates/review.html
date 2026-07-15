@@ -31,6 +31,11 @@
     </tbody>
   </table>
 
+  <div class="review-delivery">
+    <label class="field-label" for="delivery-cost">Delivery — whole quote (£)</label>
+    <input class="price-input" id="delivery-cost" type="number" min="0" step="0.01" placeholder="0.00">
+  </div>
+
   <div id="review-totals"></div>
 
   <div class="review-actions">
@@ -86,15 +91,21 @@
   .confirm-actions {
     display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px;
   }
+  .review-delivery {
+    display: flex; align-items: center; justify-content: flex-end;
+    gap: 12px; margin-top: 16px;
+  }
+  .review-delivery .price-input { width: 120px; }
   .row-assembly td { background: var(--panel-2); font-weight: 600; }
   .badge-assembly  { color: var(--blue-dark); border-color: var(--blue-dark); background: #eef6fe; }
   .rv-indent { display: inline-block; }
 </style>
 
 <script type="application/json" id="review-data">{
-  "nestId":     {{ nest_id }},
-  "parts":      {{ parts | tojson }},
-  "assemblies": {{ assemblies | tojson }}
+  "nestId":       {{ nest_id }},
+  "parts":        {{ parts | tojson }},
+  "assemblies":   {{ assemblies | tojson }},
+  "deliveryCost": {{ delivery_cost | tojson }}
 }</script>
 
 <script>
@@ -102,6 +113,25 @@ const REVIEW_DATA = JSON.parse(document.getElementById('review-data').textConten
 const NEST_ID    = REVIEW_DATA.nestId;
 const PARTS      = REVIEW_DATA.parts;
 const ASSEMBLIES = REVIEW_DATA.assemblies;   // flattened tree, parents first
+
+// Delivery is one flat charge on the whole quote — kept in sessionStorage so
+// it survives hopping between pricing pages, seeded from the saved batch.
+const DELIVERY_KEY = 'delivery_' + NEST_ID;
+
+function deliveryCost() {
+  return parseFloat(document.getElementById('delivery-cost').value) || 0;
+}
+
+(() => {
+  const raw = sessionStorage.getItem(DELIVERY_KEY);
+  const v   = raw != null ? parseFloat(raw) : REVIEW_DATA.deliveryCost;
+  if (v) document.getElementById('delivery-cost').value = v;
+})();
+
+document.getElementById('delivery-cost').addEventListener('input', () => {
+  sessionStorage.setItem(DELIVERY_KEY, deliveryCost());
+  render();
+});
 
 function loadParts() {
   // partIndex is 1-based position in PARTS (matches /price/{nest}/{i})
@@ -208,6 +238,10 @@ function totals(parts, assemblies) {
     cost += own;
     marg += a.state.own_margin_total ?? own * (1 + (a.state.margin_pct ?? 10) / 100);
   });
+  // Whole-quote delivery, passed through at cost (no margin)
+  const delivery = deliveryCost();
+  cost += delivery;
+  marg += delivery;
   return { cost, marg };
 }
 
@@ -263,6 +297,7 @@ document.getElementById('btn-generate').addEventListener('click', () => {
     fmtRow('Parts', parts.length) +
     (assemblies.length ? fmtRow('Assemblies', assemblies.length) : '') +
     fmtRow('Priced', complete) +
+    fmtRow('Delivery', fmt(deliveryCost())) +
     fmtRow('Quote total · cost', fmt(t.cost)) +
     fmtRow('NET total · with margin', fmt(t.marg), 'confirm-row-total') +
     (incomplete
@@ -289,8 +324,9 @@ document.getElementById('btn-confirm-save').addEventListener('click', async () =
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        parts:      loadParts(),
-        assemblies: loadAssemblies().map(a => ({ ...a.state, assembly_id: a.id })),
+        parts:         loadParts(),
+        assemblies:    loadAssemblies().map(a => ({ ...a.state, assembly_id: a.id })),
+        delivery_cost: deliveryCost(),
       }),
     });
     const r = await res.json();
@@ -298,6 +334,7 @@ document.getElementById('btn-confirm-save').addEventListener('click', async () =
       btn.textContent = 'Saved ✓';
       PARTS.forEach((_, i) => sessionStorage.removeItem('quote_' + NEST_ID + '_' + (i + 1)));
       ASSEMBLIES.forEach(a => sessionStorage.removeItem('assy_' + NEST_ID + '_' + a.id));
+      sessionStorage.removeItem(DELIVERY_KEY);
       window.location.href = '/quotes/' + r.quote_batch_id;
     } else {
       throw new Error();
