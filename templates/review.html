@@ -8,17 +8,19 @@
 <div class="review-page">
 
   <p class="eyebrow">Quote Review</p>
-  <h1 class="review-title">All Parts</h1>
-  <p class="review-subtext">Click any row to jump back and adjust pricing. Incomplete parts are missing a material cost.</p>
+  <h1 class="review-title">All Parts &amp; Assemblies</h1>
+  <p class="review-subtext">Click a part to adjust its cut/fold pricing, or an assembly to
+    adjust its weld / fabrication / machining / finishing. Assembly rows include the parts
+    inside them. Incomplete parts are missing a material cost.</p>
 
   <table id="review-table">
     <thead>
       <tr>
-        <th>Part No</th>
+        <th>Item</th>
         <th>Description</th>
         <th>Material</th>
         <th style="text-align:right">Qty</th>
-        <th style="text-align:right">Cost / Part</th>
+        <th style="text-align:right">Cost / Each</th>
         <th style="text-align:right">Line Cost</th>
         <th style="text-align:right">With Margin</th>
         <th style="text-align:center">Status</th>
@@ -32,7 +34,10 @@
   <div id="review-totals"></div>
 
   <div class="review-actions">
-    <a href="/price/{{ nest_id }}/1" class="btn-back">← Back to pricing</a>
+    <div style="display:flex;gap:12px">
+      <a href="/price/{{ nest_id }}/1" class="btn-back">← Back to pricing</a>
+      <a href="/assemblies/{{ nest_id }}" class="btn-back">Edit structure</a>
+    </div>
     <button class="btn-generate" id="btn-generate">Generate quote →</button>
   </div>
 
@@ -81,16 +86,25 @@
   .confirm-actions {
     display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px;
   }
+  .row-assembly td { background: var(--panel-2); font-weight: 600; }
+  .badge-assembly  { color: var(--blue-dark); border-color: var(--blue-dark); background: #eef6fe; }
+  .rv-indent { display: inline-block; }
 </style>
 
-<script type="application/json" id="review-data">{"nestId": {{ nest_id }}, "parts": {{ parts | tojson }}}</script>
+<script type="application/json" id="review-data">{
+  "nestId":     {{ nest_id }},
+  "parts":      {{ parts | tojson }},
+  "assemblies": {{ assemblies | tojson }}
+}</script>
 
 <script>
 const REVIEW_DATA = JSON.parse(document.getElementById('review-data').textContent);
-const NEST_ID = REVIEW_DATA.nestId;
-const PARTS   = REVIEW_DATA.parts;
+const NEST_ID    = REVIEW_DATA.nestId;
+const PARTS      = REVIEW_DATA.parts;
+const ASSEMBLIES = REVIEW_DATA.assemblies;   // flattened tree, parents first
 
-function loadAll() {
+function loadParts() {
+  // partIndex is 1-based position in PARTS (matches /price/{nest}/{i})
   return PARTS.map((p, i) => {
     const saved = p.saved || {};   // last saved DB state (fallback)
     try {
@@ -100,48 +114,136 @@ function loadAll() {
   });
 }
 
+function loadAssemblies() {
+  return ASSEMBLIES.map(a => {
+    const saved = a.saved || {};
+    let state = { ...saved };
+    try {
+      const raw = sessionStorage.getItem('assy_' + NEST_ID + '_' + a.id);
+      if (raw) state = { ...saved, ...JSON.parse(raw) };
+    } catch {}
+    return { ...a, state };
+  });
+}
+
+// Roll each assembly up: own process cost + its parts + its sub-assemblies.
+// ASSEMBLIES is parent-first, so walking it in reverse resolves children first.
+function rollUp(parts, assemblies) {
+  const partCost = {}, partMarg = {};
+  parts.forEach(p => {
+    if (!p.assembly_id) return;
+    partCost[p.assembly_id] = (partCost[p.assembly_id] || 0) + (p.total_cost   || 0);
+    partMarg[p.assembly_id] = (partMarg[p.assembly_id] || 0) + (p.margin_total || 0);
+  });
+  const children = {};
+  assemblies.forEach(a => {
+    if (a.parent_assembly_id) (children[a.parent_assembly_id] ||= []).push(a.id);
+  });
+  const rolledCost = {}, rolledMarg = {};
+  [...assemblies].reverse().forEach(a => {
+    const own     = a.state.own_cost || 0;
+    const ownMarg = a.state.own_margin_total
+                    ?? own * (1 + (a.state.margin_pct ?? 10) / 100);
+    rolledCost[a.id] = own + (partCost[a.id] || 0)
+                     + (children[a.id] || []).reduce((s, c) => s + rolledCost[c], 0);
+    rolledMarg[a.id] = ownMarg + (partMarg[a.id] || 0)
+                     + (children[a.id] || []).reduce((s, c) => s + rolledMarg[c], 0);
+  });
+  return { rolledCost, rolledMarg };
+}
+
 function fmt(n) { return (n != null && !isNaN(n)) ? '£' + n.toFixed(2) : '—'; }
+function indent(depth) {
+  return `<span class="rv-indent" style="width:${depth * 22}px"></span>`;
+}
+
+function partRow(p, depth) {
+  const ok = !!p.complete;
+  return `
+    <tr class="review-row${ok ? '' : ' row-incomplete'}"
+        onclick="window.location='/price/${NEST_ID}/${p._index + 1}'">
+      <td class="cell-mono">${indent(depth)}${p.part_number}</td>
+      <td>${p.drawing_desc || '—'}</td>
+      <td class="cell-mono">${p.material || '—'}</td>
+      <td class="cell-num">${p.total_qty || '—'}</td>
+      <td class="cell-num">${fmt(p.cost_per_part)}</td>
+      <td class="cell-num">${fmt(p.total_cost)}</td>
+      <td class="cell-num cell-margin">${fmt(p.margin_total)}</td>
+      <td style="text-align:center">
+        <span class="badge ${ok ? 'badge-matched' : 'badge-warn'}">${ok ? 'Complete' : 'Incomplete'}</span>
+      </td>
+    </tr>`;
+}
+
+function assemblyRow(a, roll, nParts, nSubs) {
+  const builds = a.builds || 1;
+  const cost   = roll.rolledCost[a.id];
+  const marg   = roll.rolledMarg[a.id];
+  const incl   = `includes ${nParts} part${nParts === 1 ? '' : 's'}`
+               + (nSubs ? ` + ${nSubs} sub-assembl${nSubs === 1 ? 'y' : 'ies'}` : '')
+               + ' below';
+  return `
+    <tr class="review-row row-assembly"
+        onclick="window.location='/price/${NEST_ID}/assembly/${a.id}'">
+      <td class="cell-mono">${indent(a.depth)}▣ ${a.name}</td>
+      <td>Assembly · own work ${fmt(a.state.own_cost || 0)} · ${incl}</td>
+      <td></td>
+      <td class="cell-num">${builds}</td>
+      <td class="cell-num">${fmt(cost / builds)}</td>
+      <td class="cell-num">${fmt(cost)}</td>
+      <td class="cell-num cell-margin">${fmt(marg)}</td>
+      <td style="text-align:center"><span class="badge badge-assembly">Assembly</span></td>
+    </tr>`;
+}
+
+function totals(parts, assemblies) {
+  // Every cost appears exactly once: each part line + each assembly's own work
+  let cost = 0, marg = 0;
+  parts.forEach(p => {
+    cost += p.total_cost   || 0;
+    marg += p.margin_total || 0;
+  });
+  assemblies.forEach(a => {
+    const own = a.state.own_cost || 0;
+    cost += own;
+    marg += a.state.own_margin_total ?? own * (1 + (a.state.margin_pct ?? 10) / 100);
+  });
+  return { cost, marg };
+}
 
 function render() {
-  const all   = loadAll();
-  const tbody = document.getElementById('review-body');
-  let totCost = 0, totMargin = 0;
+  const parts      = loadParts().map((p, i) => ({ ...p, _index: i }));
+  const assemblies = loadAssemblies();
+  const roll       = rollUp(parts, assemblies);
 
-  tbody.innerHTML = all.map((p, i) => {
-    const cpp  = p.cost_per_part;
-    const tot  = p.total_cost;
-    const marg = p.margin_total;
-    const ok   = !!p.complete;
+  const partsOf = {};
+  const loose   = [];
+  parts.forEach(p => {
+    const known = p.assembly_id && assemblies.some(a => a.id === p.assembly_id);
+    if (known) (partsOf[p.assembly_id] ||= []).push(p);
+    else loose.push(p);
+  });
 
-    if (tot  != null) totCost   += tot;
-    if (marg != null) totMargin += marg;
+  let html = '';
+  assemblies.forEach(a => {
+    const nParts = (partsOf[a.id] || []).length;
+    const nSubs  = assemblies.filter(o => o.parent_assembly_id === a.id).length;
+    html += assemblyRow(a, roll, nParts, nSubs);
+    (partsOf[a.id] || []).forEach(p => { html += partRow(p, a.depth + 1); });
+  });
+  loose.forEach(p => { html += partRow(p, 0); });
+  document.getElementById('review-body').innerHTML = html;
 
-    return `
-      <tr class="review-row${ok ? '' : ' row-incomplete'}"
-          onclick="window.location='/price/${NEST_ID}/${i + 1}'">
-        <td class="cell-mono">${p.part_number}</td>
-        <td>${p.drawing_desc || '—'}</td>
-        <td class="cell-mono">${p.material || '—'}</td>
-        <td class="cell-num">${p.total_qty || '—'}</td>
-        <td class="cell-num">${fmt(cpp)}</td>
-        <td class="cell-num">${fmt(tot)}</td>
-        <td class="cell-num cell-margin">${fmt(marg)}</td>
-        <td style="text-align:center">
-          <span class="badge ${ok ? 'badge-matched' : 'badge-warn'}">${ok ? 'Complete' : 'Incomplete'}</span>
-        </td>
-      </tr>`;
-  }).join('');
-
-  const totEl = document.getElementById('review-totals');
-  totEl.innerHTML = `
+  const t = totals(parts, assemblies);
+  document.getElementById('review-totals').innerHTML = `
     <div class="totals-bar">
       <div class="totals-item">
         <span class="totals-label">Quote Total · Cost</span>
-        <span class="totals-value">${fmt(totCost)}</span>
+        <span class="totals-value">${fmt(t.cost)}</span>
       </div>
       <div class="totals-item totals-right">
         <span class="totals-label">Quote Total · With Margin</span>
-        <span class="totals-value totals-margin">${fmt(totMargin)}</span>
+        <span class="totals-value totals-margin">${fmt(t.marg)}</span>
       </div>
     </div>`;
 }
@@ -151,20 +253,18 @@ function fmtRow(label, value, cls = '') {
 }
 
 document.getElementById('btn-generate').addEventListener('click', () => {
-  const all        = loadAll();
-  const complete   = all.filter(p => p.complete).length;
-  const incomplete = all.length - complete;
-  let totCost = 0, totMargin = 0;
-  all.forEach(p => {
-    if (p.total_cost   != null) totCost   += p.total_cost;
-    if (p.margin_total != null) totMargin += p.margin_total;
-  });
+  const parts      = loadParts();
+  const assemblies = loadAssemblies();
+  const complete   = parts.filter(p => p.complete).length;
+  const incomplete = parts.length - complete;
+  const t          = totals(parts, assemblies);
 
   document.getElementById('confirm-summary').innerHTML =
-    fmtRow('Parts', all.length) +
+    fmtRow('Parts', parts.length) +
+    (assemblies.length ? fmtRow('Assemblies', assemblies.length) : '') +
     fmtRow('Priced', complete) +
-    fmtRow('Quote total · cost', fmt(totCost)) +
-    fmtRow('NET total · with margin', fmt(totMargin), 'confirm-row-total') +
+    fmtRow('Quote total · cost', fmt(t.cost)) +
+    fmtRow('NET total · with margin', fmt(t.marg), 'confirm-row-total') +
     (incomplete
       ? `<p class="confirm-warn">⚠ ${incomplete} part${incomplete > 1 ? 's are' : ' is'} incomplete
          (no material cost) and will be saved as-is.</p>`
@@ -181,7 +281,6 @@ document.getElementById('confirm-overlay').addEventListener('click', e => {
 });
 
 document.getElementById('btn-confirm-save').addEventListener('click', async () => {
-  const all = loadAll();
   const btn = document.getElementById('btn-confirm-save');
   btn.disabled    = true;
   btn.textContent = 'Saving…';
@@ -189,12 +288,16 @@ document.getElementById('btn-confirm-save').addEventListener('click', async () =
     const res = await fetch('/price/' + NEST_ID + '/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(all),
+      body: JSON.stringify({
+        parts:      loadParts(),
+        assemblies: loadAssemblies().map(a => ({ ...a.state, assembly_id: a.id })),
+      }),
     });
     const r = await res.json();
     if (r.ok) {
       btn.textContent = 'Saved ✓';
       PARTS.forEach((_, i) => sessionStorage.removeItem('quote_' + NEST_ID + '_' + (i + 1)));
+      ASSEMBLIES.forEach(a => sessionStorage.removeItem('assy_' + NEST_ID + '_' + a.id));
       window.location.href = '/quotes/' + r.quote_batch_id;
     } else {
       throw new Error();

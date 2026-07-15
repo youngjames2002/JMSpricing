@@ -567,6 +567,116 @@ def _extract_pricing_factors(text: str, page) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Assembly detection — parts list (BOM) tables and assembly title keywords
+# ---------------------------------------------------------------------------
+
+_ASSY_KEYWORD_RE = re.compile(r"\b(ASSY|ASSEMBLY|WELDMENT|WELDED\s+ASS)", re.I)
+
+# SolidWorks-style parts list header: "ITEM NO. PART NUMBER DESCRIPTION QTY."
+_BOM_HEADER_RE = re.compile(
+    r"ITEM\s*NO\.?\s+PART\s*(?:NUMBER|NO\.?).*?QTY", re.I)
+
+# Parts-list row: "1 LC_TMC26_022W Dpth Stop Washer 2".
+# The part token needs a letter or dash so plain dimension numbers don't match.
+_BOM_ROW_RE = re.compile(
+    r"^\s*(\d{1,3})\s+((?=\S*[A-Za-z-])[A-Za-z0-9][\w.\-/]{2,})(?:\s+(.*?))?\s+(\d{1,4})\s*$",
+    re.M,
+)
+
+
+def _bom_from_tables(page) -> list[dict]:
+    """Parts list via pdfplumber table detection (ruled tables)."""
+    rows: list[dict] = []
+    try:
+        tables = page.extract_tables()
+    except Exception:
+        return rows
+    for table in tables or []:
+        header_idx = None
+        col = {}
+        for i, raw in enumerate(table[:3]):
+            cells = [(c or "").strip().upper() for c in raw]
+            joined = " ".join(cells)
+            if "ITEM" in joined and "QTY" in joined:
+                header_idx = i
+                for j, c in enumerate(cells):
+                    if "ITEM" in c:                       col.setdefault("item", j)
+                    elif "PART" in c or "DWG" in c:       col.setdefault("part", j)
+                    elif "DESC" in c or "TITLE" in c:     col.setdefault("desc", j)
+                    elif "QTY" in c:                      col.setdefault("qty", j)
+                break
+        if header_idx is None or "part" not in col or "qty" not in col:
+            continue
+        for raw in table[header_idx + 1:]:
+            def cell(key):
+                j = col.get(key)
+                return (raw[j] or "").strip() if j is not None and j < len(raw) else ""
+            pn = _clean(cell("part"))
+            if not pn:
+                continue
+            row = {"part_number": pn}
+            if cell("desc"):
+                row["description"] = _clean(cell("desc"))
+            try:
+                row["item_no"] = int(cell("item"))
+            except ValueError:
+                pass
+            try:
+                row["qty"] = int(float(cell("qty")))
+            except ValueError:
+                pass
+            rows.append(row)
+        if rows:
+            break
+    return rows
+
+
+def _bom_from_text(text: str) -> list[dict]:
+    """Parts list via line regexes — for exports with no detectable table
+    rulings. Only trusted when a parts-list header is present on the page."""
+    if not _BOM_HEADER_RE.search(text):
+        return []
+    rows, seen = [], set()
+    for m in _BOM_ROW_RE.finditer(text):
+        item_no, pn, desc, qty = m.groups()
+        if pn.upper() in ("ITEM", "QTY", "PART", "NO"):
+            continue
+        key = (item_no, pn.upper())
+        if key in seen:
+            continue
+        seen.add(key)
+        row = {"item_no": int(item_no), "part_number": pn}
+        if desc and _clean(desc):
+            row["description"] = _clean(desc)
+        if qty is not None:
+            row["qty"] = int(qty)
+        rows.append(row)
+    return rows
+
+
+def _extract_assembly_info(text: str, page, tb: dict) -> Optional[dict]:
+    """Detect whether this page is an assembly drawing and pull its parts
+    list. Returns {"is_assembly": True, "bom": [...]} or None. BOM rows are
+    {item_no, part_number, description, qty} with unfound fields omitted."""
+    bom = _bom_from_tables(page) if page is not None else []
+    if not bom:
+        bom = _bom_from_text(text)
+
+    is_assembly = bool(bom)
+    if not is_assembly:
+        for field in ("description", "part_number"):
+            if _ASSY_KEYWORD_RE.search(str(tb.get(field) or "")):
+                is_assembly = True
+                break
+    if not is_assembly and _BOM_HEADER_RE.search(text):
+        is_assembly = True   # parts list present even if rows didn't parse
+
+    if not is_assembly:
+        return None
+    return {"is_assembly": True, "bom": bom}
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -615,6 +725,15 @@ def parse_drawing_pdf(path: str, use_claude: bool = True) -> dict:
                         "holes_present": bool,               # for tube routing awareness; not priced
                         "radii_mm": [float, ...],
                         "process_notes": [str, ...],
+                    },
+                    # Only present when the page is an assembly drawing
+                    # (parts list found, or ASSY/WELDMENT title):
+                    "assembly": {
+                        "is_assembly": True,
+                        "bom": [
+                            {"item_no": int, "part_number": str,
+                             "description": str, "qty": int},
+                        ],
                     }
                 }
             ]
@@ -683,6 +802,15 @@ def parse_drawing_pdf(path: str, use_claude: bool = True) -> dict:
                     "pricing_factors": _extract_pricing_factors(text, page),
                 }
                 method = "generic-regex"
+
+            # Assembly detection (parts list / ASSY title). The Claude
+            # extractor supplies its own "assembly" key; regex paths detect
+            # it here from the page text and table geometry.
+            if "assembly" not in page_result and text.strip():
+                asm = _extract_assembly_info(
+                    text, page, page_result.get("title_block") or {})
+                if asm:
+                    page_result["assembly"] = asm
 
             result["pages"].append({
                 "page":              i + 1,

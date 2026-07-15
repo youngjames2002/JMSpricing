@@ -1,11 +1,12 @@
 from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
-import csv, io, os, re, uuid, zipfile
+import csv, io, os, re, sys, uuid, zipfile
 from openpyxl import Workbook
 from openpyxl.styles import Font
 import fitz  # PyMuPDF
@@ -13,6 +14,7 @@ from readNestsCSV import parse_nest_csv
 from readDrawings import parse_drawing_pdf
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -70,7 +72,61 @@ _MAT_LABEL = {
 }
 
 
+# The database is remote (~200ms TCP+TLS+auth per connection), so opening a
+# fresh connection per request dominated response times. Connections are
+# pooled and health-checked instead; get_db() keeps its old contract —
+# callers still call conn.close(), which returns the connection to the pool.
+
+_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+
+
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pool
+    if _pool is None:
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            1, 20, os.getenv("DATABASE_STRING"))
+    return _pool
+
+
+class _PooledConn:
+    """Proxy that returns the underlying connection to the pool on close()."""
+
+    def __init__(self, pool, conn):
+        self._pool = pool
+        self._conn = conn
+
+    def close(self):
+        if self._conn is not None:
+            try:
+                self._conn.rollback()   # clear any open/aborted transaction
+                self._pool.putconn(self._conn)
+            except psycopg2.Error:
+                self._pool.putconn(self._conn, close=True)
+            self._conn = None
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 def get_db():
+    try:
+        pool = _get_pool()
+    except psycopg2.Error:
+        return psycopg2.connect(os.getenv("DATABASE_STRING"))
+
+    for _ in range(2):
+        try:
+            conn = pool.getconn()
+        except psycopg2.pool.PoolError:      # pool exhausted
+            return psycopg2.connect(os.getenv("DATABASE_STRING"))
+        try:
+            # Ping: idle pooled connections can be dropped server-side
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            return _PooledConn(pool, conn)
+        except psycopg2.Error:
+            pool.putconn(conn, close=True)
     return psycopg2.connect(os.getenv("DATABASE_STRING"))
 
 
@@ -89,12 +145,12 @@ def render_pdf_preview(pdf_path: Path, dpi: int = 150) -> Path | None:
 
 
 @app.get("/")
-async def home(request: Request):
+def home(request: Request):
     return templates.TemplateResponse(request, "base.html")
 
 
 @app.get("/upload")
-async def upload(request: Request):
+def upload(request: Request):
     return templates.TemplateResponse(request, "upload.html")
 
 
@@ -105,19 +161,29 @@ async def handle_upload(
     quote_name: str = Form(...),
     customer: str = Form(default=""),
 ):
+    csv_bytes = await csv_file.read()
+    zip_bytes = await zip_file.read()
+    return await run_in_threadpool(
+        _handle_upload_sync, csv_file.filename, csv_bytes, zip_bytes,
+        quote_name, customer,
+    )
+
+
+def _handle_upload_sync(csv_filename: str, csv_bytes: bytes, zip_bytes: bytes,
+                        quote_name: str, customer: str):
     uid = uuid.uuid4().hex
 
     # Save CSV
     nest_dir = UPLOAD_DIR / "nests"
     nest_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = nest_dir / f"{uid}_{csv_file.filename}"
-    csv_path.write_bytes(await csv_file.read())
+    csv_path = nest_dir / f"{uid}_{csv_filename}"
+    csv_path.write_bytes(csv_bytes)
 
     # Unzip and save individual PDFs
     drawings_dir = UPLOAD_DIR / "drawings" / uid
     drawings_dir.mkdir(parents=True, exist_ok=True)
     pdf_paths = []
-    with zipfile.ZipFile(io.BytesIO(await zip_file.read())) as zf:
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         for entry in zf.namelist():
             if entry.lower().endswith(".pdf"):
                 safe_name = Path(entry).name
@@ -156,7 +222,7 @@ async def handle_upload(
 
 
 @app.get("/match/{nest_id}")
-async def match_review(request: Request, nest_id: int):
+def match_review(request: Request, nest_id: int):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -247,8 +313,12 @@ async def match_review(request: Request, nest_id: int):
 
 @app.post("/match/{nest_id}/confirm")
 async def confirm_match(request: Request, nest_id: int):
-    form = await request.form()
+    form = dict(await request.form())
+    # PDF re-parsing + DB writes are blocking — keep them off the event loop
+    return await run_in_threadpool(_confirm_match_sync, nest_id, form)
 
+
+def _confirm_match_sync(nest_id: int, form: dict):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("SELECT * FROM nests WHERE id = %s", (nest_id,))
@@ -327,9 +397,336 @@ async def confirm_match(request: Request, nest_id: int):
         ))
 
     conn.commit()
-    cur.close(); wc.close(); conn.close()
+    cur.close(); wc.close()
 
-    return RedirectResponse(url=f"/price/{nest_id}", status_code=303)
+    # Auto-detect assemblies from the uploaded drawings (parts lists / ASSY
+    # titles) so the structure page arrives pre-populated. Failures here
+    # must never block the pricing flow.
+    try:
+        _auto_detect_assemblies(conn, nest_id)
+    except Exception as e:
+        print(f"assembly auto-detect failed for nest {nest_id}: {e}", file=sys.stderr)
+    conn.close()
+
+    return RedirectResponse(url=f"/assemblies/{nest_id}", status_code=303)
+
+
+# ── Assemblies ───────────────────────────────────────────────────────────────
+# Parts can be grouped into assemblies, and assemblies nested inside other
+# assemblies. Cut/fold is priced on the part; weld / fabrication / machining /
+# finishing are priced on the assembly as a whole.
+
+def _assembly_tree(assemblies: list[dict]) -> list[dict]:
+    """Annotate each assembly with depth and total builds (qty × parent
+    builds), returning a depth-first flattened list (parents before children).
+    Orphans from a broken parent chain are appended at depth 0."""
+    by_id     = {a["id"]: a for a in assemblies}
+    by_parent: dict = {}
+    for a in assemblies:
+        pid = a["parent_assembly_id"]
+        by_parent.setdefault(pid if pid in by_id else None, []).append(a)
+
+    out: list[dict] = []
+
+    def walk(pid, depth, mult):
+        for a in by_parent.get(pid, []):
+            q = max(a.get("qty") or 1, 1)
+            a["depth"]  = depth
+            a["builds"] = mult * q
+            out.append(a)
+            walk(a["id"], depth + 1, mult * q)
+
+    walk(None, 0, 1)
+    seen = {a["id"] for a in out}
+    for a in assemblies:   # cycle fallback — never reached with validated parents
+        if a["id"] not in seen:
+            a["depth"], a["builds"] = 0, max(a.get("qty") or 1, 1)
+            out.append(a)
+    return out
+
+
+def fetch_assemblies(cur, nest_id: int) -> list[dict]:
+    """All assemblies for a nest as a flattened tree with builds/depth/part count."""
+    cur.execute("""
+        SELECT a.*, COUNT(np.id) AS part_count
+        FROM assemblies a
+        LEFT JOIN nest_parts np ON np.assembly_id = a.id
+        WHERE a.nest_id = %s
+        GROUP BY a.id
+        ORDER BY a.sort_order, a.id
+    """, (nest_id,))
+    return _assembly_tree([dict(r) for r in cur.fetchall()])
+
+
+def _is_descendant(cur, assembly_id: int, candidate_parent: int) -> bool:
+    """True if candidate_parent sits below assembly_id (or is it) — would cycle."""
+    cur.execute("SELECT id, parent_assembly_id FROM assemblies WHERE nest_id = "
+                "(SELECT nest_id FROM assemblies WHERE id = %s)", (assembly_id,))
+    rows = cur.fetchall()
+    # Works with both tuple and RealDict cursors
+    parent_of = {(r["id"] if isinstance(r, dict) else r[0]):
+                 (r["parent_assembly_id"] if isinstance(r, dict) else r[1])
+                 for r in rows}
+    node = candidate_parent
+    while node is not None:
+        if node == assembly_id:
+            return True
+        node = parent_of.get(node)
+    return False
+
+
+_ASSY_NAME_RE = re.compile(r"\b(ASSY|ASSEMBLY|WELDMENT)\b", re.I)
+
+
+def _norm_pn(pn: str) -> str:
+    """Normalise a part number for matching: underscores → hyphens, strip
+    trailing revision, uppercase — same rules as the drawing/CSV matcher."""
+    return _strip_rev((pn or "").replace("_", "-").strip())
+
+
+def _auto_detect_assemblies(conn, nest_id: int) -> dict:
+    """Scan the nest's uploaded drawings for assembly drawings (parts list /
+    BOM tables, ASSY/WELDMENT titles) and build the assembly tree from them:
+    create an assembly per assembly drawing, assign nest parts referenced in
+    its BOM, and nest sub-assemblies whose BOM rows point at other assembly
+    drawings (with the BOM quantity).
+
+    Parse results are cached on the drawings row (is_assembly, bom), so
+    re-running only parses drawings that were never scanned. Manual structure
+    is respected: parts already assigned and assemblies already nested are
+    never moved."""
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM nests WHERE id = %s", (nest_id,))
+    nest = cur.fetchone()
+    if not nest:
+        cur.close()
+        return {"error": "Nest not found"}
+
+    uid = Path(nest["file_path"]).name.split("_")[0]
+    cur.execute("SELECT * FROM drawings WHERE file_path LIKE %s",
+                (f"uploads/drawings/{uid}/%",))
+    batch_drawings = [dict(r) for r in cur.fetchall()]
+
+    wc = conn.cursor()
+    infos, scanned = [], 0
+    for d in batch_drawings:
+        stem       = Path(d["file_path"]).stem
+        stem_parts = stem.split(" ", 1)
+        info = {
+            "db":   d,
+            "key":  _norm_pn(stem_parts[0]),
+            "name": (stem_parts[1] if len(stem_parts) > 1 else stem).strip(),
+            "asm":  None,
+        }
+
+        if d.get("is_assembly") is not None:
+            # Cached from an earlier scan — no re-parse
+            if d["is_assembly"]:
+                info["asm"] = {"is_assembly": True, "bom": d.get("bom") or []}
+            if d.get("part_number"):
+                info["key"] = _norm_pn(d["part_number"])
+        else:
+            scanned += 1
+            asm = None
+            try:
+                parsed = parse_drawing_pdf(str(BASE_DIR / d["file_path"]))
+                page0  = parsed["pages"][0] if parsed["pages"] else {}
+                tb     = page0.get("title_block") or {}
+                asm    = page0.get("assembly")
+                if tb.get("part_number"):
+                    info["key"] = _norm_pn(tb["part_number"])
+                if tb.get("description") and len(stem_parts) == 1:
+                    info["name"] = tb["description"]
+            except Exception:
+                pass
+            info["asm"] = asm
+            wc.execute("UPDATE drawings SET is_assembly = %s, bom = %s WHERE id = %s",
+                       (bool(asm),
+                        psycopg2.extras.Json(asm["bom"]) if asm else None,
+                        d["id"]))
+
+        # Filename that says ASSY/WELDMENT counts even with no parts list
+        if not info["asm"] and _ASSY_NAME_RE.search(stem):
+            info["asm"] = {"is_assembly": True, "bom": []}
+        infos.append(info)
+
+    assembly_infos = [i for i in infos if i["asm"]]
+
+    # Existing assemblies → idempotent re-runs (match by drawing, then name)
+    cur.execute("SELECT * FROM assemblies WHERE nest_id = %s", (nest_id,))
+    existing   = [dict(r) for r in cur.fetchall()]
+    by_drawing = {a["drawing_id"]: a for a in existing if a.get("drawing_id")}
+    by_name    = {a["name"].strip().upper(): a for a in existing}
+
+    created = 0
+    info_by_key = {}
+    for i in assembly_infos:
+        a = by_drawing.get(i["db"]["id"]) or by_name.get(i["name"].upper())
+        if a:
+            i["assembly_id"] = a["id"]
+        else:
+            wc.execute("""
+                INSERT INTO assemblies (nest_id, name, qty, drawing_id, auto_detected)
+                VALUES (%s, %s, 1, %s, TRUE) RETURNING id
+            """, (nest_id, i["name"][:120], i["db"]["id"]))
+            i["assembly_id"] = wc.fetchone()[0]
+            created += 1
+        info_by_key[i["key"]] = i
+
+    # Resolve BOM rows: nest parts get assigned, assembly drawings get nested
+    cur.execute("SELECT id, part_number, assembly_id FROM nest_parts WHERE nest_id = %s",
+                (nest_id,))
+    part_by_key = {_norm_pn(r["part_number"]): dict(r) for r in cur.fetchall()}
+
+    assigned = linked = 0
+    for i in assembly_infos:
+        for row in i["asm"]["bom"] or []:
+            key = _norm_pn(row.get("part_number", ""))
+            if not key:
+                continue
+            child = info_by_key.get(key)
+            if child and child["assembly_id"] != i["assembly_id"]:
+                # Sub-assembly: nest it (never re-parent something the user
+                # placed, and never create a cycle)
+                if not _is_descendant(cur, child["assembly_id"], i["assembly_id"]):
+                    wc.execute("""
+                        UPDATE assemblies SET parent_assembly_id = %s, qty = %s
+                        WHERE id = %s AND parent_assembly_id IS NULL
+                    """, (i["assembly_id"], max(int(row.get("qty") or 1), 1),
+                          child["assembly_id"]))
+                    linked += wc.rowcount
+            else:
+                p = part_by_key.get(key)
+                if p and p["assembly_id"] is None:
+                    wc.execute("""
+                        UPDATE nest_parts SET assembly_id = %s
+                        WHERE id = %s AND assembly_id IS NULL
+                    """, (i["assembly_id"], p["id"]))
+                    assigned += wc.rowcount
+                    p["assembly_id"] = i["assembly_id"]
+
+    conn.commit()
+    cur.close(); wc.close()
+    return {"ok": True, "drawings_scanned": scanned,
+            "assemblies_detected": len(assembly_infos),
+            "assemblies_created": created,
+            "parts_assigned": assigned, "sub_assemblies_linked": linked}
+
+
+@app.post("/assemblies/{nest_id}/autodetect")
+def assemblies_autodetect(nest_id: int):
+    """Re-run assembly auto-detection over this nest's drawings."""
+    conn = get_db()
+    try:
+        result = _auto_detect_assemblies(conn, nest_id)
+    finally:
+        conn.close()
+    status = 404 if result.get("error") else 200
+    return JSONResponse(result, status_code=status)
+
+
+@app.get("/assemblies/{nest_id}")
+def assemblies_page(request: Request, nest_id: int):
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT np.id, np.part_number, np.material, np.total_qty, np.assembly_id,
+               d.description
+        FROM nest_parts np LEFT JOIN drawings d ON d.id = np.drawing_id
+        WHERE np.nest_id = %s ORDER BY np.id
+    """, (nest_id,))
+    parts = [dict(r) for r in cur.fetchall()]
+    assemblies = fetch_assemblies(cur, nest_id)
+    cur.close(); conn.close()
+    return templates.TemplateResponse(request, "assemblies.html", {
+        "nest_id": nest_id, "parts": parts, "assemblies": assemblies,
+    })
+
+
+@app.post("/assemblies")
+async def assembly_create(request: Request):
+    data = await request.json()
+    name = (data.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "Name required"}, status_code=400)
+    parent = data.get("parent_assembly_id") or None
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("""
+        INSERT INTO assemblies (nest_id, parent_assembly_id, name, qty)
+        VALUES (%s, %s, %s, %s) RETURNING id
+    """, (data["nest_id"], parent, name, max(int(data.get("qty") or 1), 1)))
+    new_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close(); conn.close()
+    return JSONResponse({"ok": True, "id": new_id})
+
+
+@app.post("/assemblies/{assembly_id}/update")
+async def assembly_update(request: Request, assembly_id: int):
+    data = await request.json()
+    conn = get_db()
+    cur  = conn.cursor()
+
+    if "parent_assembly_id" in data:
+        parent = data["parent_assembly_id"] or None
+        if parent and _is_descendant(cur, assembly_id, int(parent)):
+            cur.close(); conn.close()
+            return JSONResponse({"error": "That would nest an assembly inside itself"},
+                                status_code=400)
+        cur.execute("UPDATE assemblies SET parent_assembly_id = %s WHERE id = %s",
+                    (parent, assembly_id))
+
+    if data.get("name", "").strip():
+        cur.execute("UPDATE assemblies SET name = %s WHERE id = %s",
+                    (data["name"].strip(), assembly_id))
+    if data.get("qty") is not None:
+        cur.execute("UPDATE assemblies SET qty = %s WHERE id = %s",
+                    (max(int(data["qty"]), 1), assembly_id))
+
+    conn.commit()
+    cur.close(); conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/assemblies/{assembly_id}/delete")
+def assembly_delete(assembly_id: int):
+    conn = get_db()
+    cur  = conn.cursor()
+    # Promote children to the deleted assembly's parent; parts unassign via FK
+    cur.execute("""
+        UPDATE assemblies SET parent_assembly_id =
+            (SELECT parent_assembly_id FROM assemblies WHERE id = %s)
+        WHERE parent_assembly_id = %s
+    """, (assembly_id, assembly_id))
+    cur.execute("DELETE FROM assembly_quotes WHERE assembly_id = %s", (assembly_id,))
+    cur.execute("DELETE FROM assemblies WHERE id = %s", (assembly_id,))
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close(); conn.close()
+    if not deleted:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/assemblies/{nest_id}/assign")
+async def assembly_assign(request: Request, nest_id: int):
+    """Assign a nest part to an assembly (or back to loose with null)."""
+    data        = await request.json()
+    assembly_id = data.get("assembly_id") or None
+    conn = get_db()
+    cur  = conn.cursor()
+    if assembly_id:
+        cur.execute("SELECT 1 FROM assemblies WHERE id = %s AND nest_id = %s",
+                    (assembly_id, nest_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return JSONResponse({"error": "Assembly not in this nest"}, status_code=400)
+    cur.execute("UPDATE nest_parts SET assembly_id = %s WHERE id = %s AND nest_id = %s",
+                (assembly_id, data["nest_part_id"], nest_id))
+    conn.commit()
+    cur.close(); conn.close()
+    return JSONResponse({"ok": True})
 
 
 # ── Pricing calculation ──────────────────────────────────────────────────────
@@ -396,13 +793,69 @@ def calculate_price(d: dict, rates: dict) -> dict:
     }
 
 
+def calculate_assembly_price(d: dict, rates: dict) -> dict:
+    """Compute assembly-level process costs (weld / fabrication / machining /
+    finishing) from form inputs + a burden_rates row. Inputs are per build;
+    'builds' is the total number of this assembly across the order
+    (qty × parent builds). Child part/assembly costs are rolled up separately."""
+    def f(k, default=0):
+        try: return float(d.get(k) or default)
+        except (TypeError, ValueError): return float(default)
+
+    builds = max(int(f("builds", 1)), 1)
+    active = d.get("active_processes") or []
+
+    weld    = (f("weld_time_mins")    / 60) * rates["weld_saw_rate"] * builds if "weld"    in active else 0.0
+    fab     = (f("fab_time_mins")     / 60) * rates["assembly_rate"] * builds if "fab"     in active else 0.0
+    machine = (f("machine_time_mins") / 60) * rates["machine_rate"]  * builds if "machine" in active else 0.0
+    finish  = f("finish_cost") * rates["finishing_markup"] * builds           if "finish"  in active else 0.0
+    misc    = f("misc_cost") * builds
+
+    own        = weld + fab + machine + finish + misc
+    margin_pct = f("margin_pct", 10)
+
+    return {
+        "builds":           builds,
+        "cost_per_build":   round(own / builds, 2),
+        "own_cost":         round(own, 2),
+        "own_margin_total": round(own * (1 + margin_pct / 100), 2),
+        "breakdown": {
+            "weld":    round(weld, 2),    "fab":    round(fab, 2),
+            "machine": round(machine, 2), "finish": round(finish, 2),
+            "misc":    round(misc, 2),
+        },
+    }
+
+
+def assembly_quote_row_to_state(q: dict) -> dict:
+    """Map a saved assembly_quotes row back to the pricing-form state shape."""
+    active = [proc for proc in ("weld", "fab", "machine", "finish")
+              if q.get(f"{proc}_active")]
+    return {
+        "assembly_id":       q.get("assembly_id"),
+        "builds":            q.get("builds"),
+        "weld_time_mins":    q.get("weld_time_mins"),
+        "fab_time_mins":     q.get("fab_time_mins"),
+        "machine_time_mins": q.get("machine_time_mins"),
+        "finish_cost":       q.get("finish_cost"),
+        "misc_cost":         q.get("misc_cost"),
+        "margin_pct":        q.get("margin_pct"),
+        "active_processes":  active,
+        "own_cost":          q.get("own_cost"),
+        "own_margin_total":  (round(q["own_cost"] * (1 + (q.get("margin_pct") or 0) / 100), 2)
+                              if q.get("own_cost") is not None else None),
+    }
+
+
 def quote_row_to_state(q: dict) -> dict:
     """Map a saved quotes row back to the pricing-form state shape used by the
     front end (sessionStorage / save payload), so quotes can be reopened."""
     active = []
     if (q.get("num_folds") or 0) > 0:
         active.append("fold")
-    for proc in ("tube", "weld", "saw", "machine", "assembly"):
+    # Weld / machine / assembly are assembly-level processes now — old part
+    # quotes that had them are re-priced with cut/fold only.
+    for proc in ("tube", "saw"):
         if q.get(f"{proc}_active"):
             active.append(proc)
     return {
@@ -439,12 +892,12 @@ def quote_row_to_state(q: dict) -> dict:
 # ── Pricing pages ────────────────────────────────────────────────────────────
 
 @app.get("/price/{nest_id}")
-async def price_start(nest_id: int):
+def price_start(nest_id: int):
     return RedirectResponse(url=f"/price/{nest_id}/1", status_code=302)
 
 
 @app.get("/price/{nest_id}/review")
-async def price_review(request: Request, nest_id: int):
+def price_review(request: Request, nest_id: int):
     conn = get_db()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -470,20 +923,30 @@ async def price_review(request: Request, nest_id: int):
     cur.execute("SELECT * FROM materials WHERE is_active = true LIMIT 1")
     mats  = cur.fetchone()
 
+    # Pricing history for parts with no saved line, fetched in ONE query
+    # (latest quote per part number) — the remote DB makes per-part queries
+    # cost ~20ms each, which added seconds on large nests.
+    need_history = [p["part_number"] for p in parts if p["id"] not in saved]
+    history: dict = {}
+    if need_history and rates:
+        cur.execute("""
+            SELECT DISTINCT ON (UPPER(np2.part_number))
+                   UPPER(np2.part_number) AS hist_pn, q.*
+            FROM quotes q
+            JOIN nest_parts np2 ON np2.id = q.nest_part_id
+            WHERE UPPER(np2.part_number) = ANY(%s)
+            ORDER BY UPPER(np2.part_number),
+                     q.quoted_at DESC NULLS LAST, q.id DESC
+        """, ([pn.upper() for pn in need_history],))
+        history = {r["hist_pn"]: dict(r) for r in cur.fetchall()}
+
     for p in parts:
         state = saved.get(p["id"])
         if not state and rates:
             # Same pricing-history fallback as the part page, recomputed with
             # this nest's quantity/geometry and current rates — otherwise
             # history-prefilled parts show as Incomplete until each is opened.
-            cur.execute("""
-                SELECT q.* FROM quotes q
-                JOIN nest_parts np2 ON np2.id = q.nest_part_id
-                WHERE UPPER(np2.part_number) = UPPER(%s)
-                ORDER BY q.quoted_at DESC NULLS LAST, q.id DESC
-                LIMIT 1
-            """, (p["part_number"],))
-            hist = cur.fetchone()
+            hist = history.get(p["part_number"].upper())
             if hist:
                 state = quote_row_to_state(dict(hist))
                 state["nest_part_id"] = p["id"]
@@ -508,9 +971,24 @@ async def price_review(request: Request, nest_id: int):
                 )
         p["saved"] = state
 
+    # Assembly tree + saved assembly-level pricing (latest batch)
+    assemblies  = fetch_assemblies(cur, nest_id)
+    saved_assy = {}
+    if batch:
+        cur.execute("SELECT * FROM assembly_quotes WHERE quote_batch_id = %s",
+                    (batch["id"],))
+        saved_assy = {r["assembly_id"]: assembly_quote_row_to_state(dict(r))
+                      for r in cur.fetchall()}
+    for a in assemblies:
+        state = saved_assy.get(a["id"])
+        if state:
+            state["builds"] = a["builds"]   # structure may have changed since save
+        a["saved"] = state
+        a.pop("created_at", None)           # not JSON-serialisable, not needed
+
     cur.close(); conn.close()
     return templates.TemplateResponse(request, "review.html", {
-        "nest_id": nest_id, "parts": parts,
+        "nest_id": nest_id, "parts": parts, "assemblies": assemblies,
     })
 
 
@@ -530,6 +1008,18 @@ def _opt_text(v):
 @app.post("/price/{nest_id}/save")
 async def price_save(request: Request, nest_id: int):
     data = await request.json()
+    # Long chain of blocking queries — keep it off the event loop
+    return await run_in_threadpool(_price_save_sync, nest_id, data)
+
+
+def _price_save_sync(nest_id: int, data):
+    # Old payload shape was a bare list of parts; new shape splits
+    # part-level and assembly-level pricing.
+    if isinstance(data, list):
+        parts_data, assy_data = data, []
+    else:
+        parts_data = data.get("parts") or []
+        assy_data  = data.get("assemblies") or []
     conn = get_db()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -553,17 +1043,22 @@ async def price_save(request: Request, nest_id: int):
         cur.execute("INSERT INTO quote_batches (nest_id) VALUES (%s) RETURNING id", (nest_id,))
         batch_id = cur.fetchone()["id"]
 
-    cur.execute("SELECT id, drawing_id FROM nest_parts WHERE nest_id = %s", (nest_id,))
-    drawing_of = {r["id"]: r["drawing_id"] for r in cur.fetchall()}
+    cur.execute("SELECT id, drawing_id, assembly_id FROM nest_parts WHERE nest_id = %s",
+                (nest_id,))
+    rows        = cur.fetchall()
+    drawing_of  = {r["id"]: r["drawing_id"]  for r in rows}
+    assembly_of = {r["id"]: r["assembly_id"] for r in rows}
 
     wc = conn.cursor()
     subtotal = margin_sum = 0.0
-    for p in data:
+    part_results: dict = {}
+    for p in parts_data:
         np_id = p.get("nest_part_id")
         if np_id not in drawing_of:
             continue
 
         result = calculate_price(p, rates)
+        part_results[np_id] = result
         subtotal   += result["total_cost"]
         margin_sum += result["margin_total"]
 
@@ -667,6 +1162,82 @@ async def price_save(request: Request, nest_id: int):
             psycopg2.extras.Json(result["breakdown"]),
         ))
 
+    # ── Assembly-level costs + tree roll-up ──
+    assemblies = fetch_assemblies(cur, nest_id)
+    assy_state = {a["assembly_id"]: a for a in assy_data if a.get("assembly_id")}
+
+    # Child part line costs / margins per assembly
+    part_cost_of: dict = {}
+    part_marg_of: dict = {}
+    for np_id, res in part_results.items():
+        aid = assembly_of.get(np_id)
+        if aid:
+            part_cost_of[aid] = part_cost_of.get(aid, 0.0) + res["total_cost"]
+            part_marg_of[aid] = part_marg_of.get(aid, 0.0) + res["margin_total"]
+
+    children_of: dict = {}
+    for a in assemblies:
+        if a["parent_assembly_id"]:
+            children_of.setdefault(a["parent_assembly_id"], []).append(a["id"])
+
+    own_results = {a["id"]: calculate_assembly_price(
+        {**(assy_state.get(a["id"]) or {}), "builds": a["builds"]}, rates,
+    ) for a in assemblies}
+
+    # assemblies is flattened parent-first, so reversed() walks children first
+    rolled_cost: dict = {}
+    rolled_marg: dict = {}
+    for a in reversed(assemblies):
+        aid = a["id"]
+        own = own_results[aid]
+        rolled_cost[aid] = round(own["own_cost"] + part_cost_of.get(aid, 0.0)
+                                 + sum(rolled_cost[c] for c in children_of.get(aid, [])), 2)
+        rolled_marg[aid] = round(own["own_margin_total"] + part_marg_of.get(aid, 0.0)
+                                 + sum(rolled_marg[c] for c in children_of.get(aid, [])), 2)
+
+    for a in assemblies:
+        aid    = a["id"]
+        state  = assy_state.get(aid) or {}
+        own    = own_results[aid]
+        active = state.get("active_processes") or []
+        subtotal   += own["own_cost"]
+        margin_sum += own["own_margin_total"]
+        wc.execute("""
+            INSERT INTO assembly_quotes (
+                quote_batch_id, assembly_id, quoted_at, builds,
+                weld_active, weld_time_mins, fab_active, fab_time_mins,
+                machine_active, machine_time_mins, finish_active, finish_cost,
+                misc_cost, margin_pct,
+                own_cost, rolled_cost, rolled_margin_total, breakdown
+            ) VALUES (%s,%s, NOW(),%s, %s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s,%s,%s)
+            ON CONFLICT (quote_batch_id, assembly_id) DO UPDATE SET
+                quoted_at           = EXCLUDED.quoted_at,
+                builds              = EXCLUDED.builds,
+                weld_active         = EXCLUDED.weld_active,
+                weld_time_mins      = EXCLUDED.weld_time_mins,
+                fab_active          = EXCLUDED.fab_active,
+                fab_time_mins       = EXCLUDED.fab_time_mins,
+                machine_active      = EXCLUDED.machine_active,
+                machine_time_mins   = EXCLUDED.machine_time_mins,
+                finish_active       = EXCLUDED.finish_active,
+                finish_cost         = EXCLUDED.finish_cost,
+                misc_cost           = EXCLUDED.misc_cost,
+                margin_pct          = EXCLUDED.margin_pct,
+                own_cost            = EXCLUDED.own_cost,
+                rolled_cost         = EXCLUDED.rolled_cost,
+                rolled_margin_total = EXCLUDED.rolled_margin_total,
+                breakdown           = EXCLUDED.breakdown
+        """, (
+            batch_id, aid, a["builds"],
+            "weld" in active,    _opt_num(state.get("weld_time_mins")),
+            "fab" in active,     _opt_num(state.get("fab_time_mins")),
+            "machine" in active, _opt_num(state.get("machine_time_mins")),
+            "finish" in active,  _opt_num(state.get("finish_cost")),
+            _opt_num(state.get("misc_cost")), state.get("margin_pct", 10),
+            own["own_cost"], rolled_cost[aid], rolled_marg[aid],
+            psycopg2.extras.Json(own["breakdown"]),
+        ))
+
     wc.execute("""
         UPDATE quote_batches SET
             status = 'final', burden_rate_id = %s, material_id = %s,
@@ -693,15 +1264,79 @@ async def price_calculate(request: Request):
     return JSONResponse(calculate_price(d, rates))
 
 
+@app.post("/price/assembly/calculate")
+async def price_assembly_calculate(request: Request):
+    d    = await request.json()
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM burden_rates WHERE is_active = true LIMIT 1")
+    rates = cur.fetchone()
+    cur.close(); conn.close()
+    if not rates:
+        return JSONResponse({"error": "No active burden rates"}, status_code=400)
+
+    return JSONResponse(calculate_assembly_price(d, rates))
+
+
+@app.get("/price/{nest_id}/assembly/{assembly_id}")
+def price_assembly(request: Request, nest_id: int, assembly_id: int):
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    assemblies = fetch_assemblies(cur, nest_id)
+    assembly   = next((a for a in assemblies if a["id"] == assembly_id), None)
+    if not assembly:
+        cur.close(); conn.close()
+        return JSONResponse({"error": "Not found"}, status_code=404)
+
+    # Contents: direct child parts and sub-assemblies
+    cur.execute("""
+        SELECT np.id, np.part_number, np.total_qty, d.description
+        FROM nest_parts np LEFT JOIN drawings d ON d.id = np.drawing_id
+        WHERE np.nest_id = %s AND np.assembly_id = %s ORDER BY np.id
+    """, (nest_id, assembly_id))
+    child_parts = [dict(r) for r in cur.fetchall()]
+    child_assemblies = [a for a in assemblies
+                        if a["parent_assembly_id"] == assembly_id]
+
+    # Saved assembly pricing (latest batch) → prefill fallback
+    cur.execute("""
+        SELECT aq.* FROM assembly_quotes aq
+        JOIN quote_batches qb ON qb.id = aq.quote_batch_id
+        WHERE aq.assembly_id = %s AND qb.nest_id = %s
+        ORDER BY qb.id DESC LIMIT 1
+    """, (assembly_id, nest_id))
+    saved_row   = cur.fetchone()
+    saved_state = assembly_quote_row_to_state(dict(saved_row)) if saved_row else None
+    if saved_state:
+        saved_state["builds"] = assembly["builds"]
+    cur.close(); conn.close()
+
+    # Prev/next assembly for the nav bar (tree order)
+    idx = next(i for i, a in enumerate(assemblies) if a["id"] == assembly_id)
+    return templates.TemplateResponse(request, "price_assembly.html", {
+        "nest_id":          nest_id,
+        "assembly":         assembly,
+        "assemblies":       assemblies,
+        "assembly_index":   idx + 1,
+        "prev_id":          assemblies[idx - 1]["id"] if idx > 0 else None,
+        "next_id":          assemblies[idx + 1]["id"] if idx + 1 < len(assemblies) else None,
+        "child_parts":      child_parts,
+        "child_assemblies": child_assemblies,
+        "saved_state":      saved_state,
+    })
+
+
 @app.get("/price/{nest_id}/{part_index}")
-async def price_part(request: Request, nest_id: int, part_index: int):
+def price_part(request: Request, nest_id: int, part_index: int):
     conn = get_db()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
         SELECT np.*, d.file_path AS drawing_path, d.description AS drawing_desc,
-               d.revision AS drawing_revision, d.bending_required, d.bend_count
+               d.revision AS drawing_revision, d.bending_required, d.bend_count,
+               a.name AS assembly_name
         FROM nest_parts np
         LEFT JOIN drawings d ON d.id = np.drawing_id
+        LEFT JOIN assemblies a ON a.id = np.assembly_id
         WHERE np.nest_id = %s ORDER BY np.id
     """, (nest_id,))
     all_parts = [dict(p) for p in cur.fetchall()]
@@ -755,6 +1390,7 @@ async def price_part(request: Request, nest_id: int, part_index: int):
             saved_state["prefill_date"]   = (hist["quoted_at"].strftime("%d %b %Y")
                                              if hist["quoted_at"] else None)
 
+    assemblies = fetch_assemblies(cur, nest_id)
     cur.close(); conn.close()
 
     drawing_image_url = None
@@ -773,11 +1409,12 @@ async def price_part(request: Request, nest_id: int, part_index: int):
         "catalogue":         _MAT_LABEL.get(part["material"], ""),
         "drawing_image_url": drawing_image_url,
         "saved_state":       saved_state,
+        "first_assembly_id": assemblies[0]["id"] if assemblies else None,
     })
 
 
 @app.get("/rates")
-async def rates(request: Request):
+def rates(request: Request):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("SELECT * FROM materials ORDER BY is_active DESC NULLS LAST, created_at DESC;")
@@ -790,7 +1427,7 @@ async def rates(request: Request):
 
 
 @app.post("/materials/{material_id}/select")
-async def select_material(material_id: int):
+def select_material(material_id: int):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("UPDATE materials SET is_active = false")
@@ -848,7 +1485,7 @@ async def add_material_set(request: Request):
 
 
 @app.post("/rates/{rate_id}/select")
-async def select_rate(rate_id: int):
+def select_rate(rate_id: int):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("UPDATE burden_rates SET is_active = false")
@@ -862,7 +1499,8 @@ async def select_rate(rate_id: int):
 # ── Saved quotes & export ────────────────────────────────────────────────────
 
 def fetch_quote_batch(batch_id: int):
-    """Load a quote batch header + its lines (parts, prices, breakdown)."""
+    """Load a quote batch header + its part lines + its assembly lines
+    (tree-ordered, with depth)."""
     conn = get_db()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -872,14 +1510,14 @@ def fetch_quote_batch(batch_id: int):
         WHERE qb.id = %s
     """, (batch_id,))
     batch = cur.fetchone()
-    lines = []
+    lines, assembly_lines = [], []
     if batch:
         cur.execute("SELECT COUNT(*) AS n FROM nest_parts WHERE nest_id = %s",
                     (batch["nest_id"],))
         batch["part_count"] = cur.fetchone()["n"]
         cur.execute("""
             SELECT q.*, np.part_number, np.material, np.thickness_mm,
-                   d.revision, d.description
+                   np.assembly_id, d.revision, d.description
             FROM quotes q
             JOIN nest_parts np ON np.id = q.nest_part_id
             LEFT JOIN drawings d ON d.id = np.drawing_id
@@ -891,8 +1529,48 @@ def fetch_quote_batch(batch_id: int):
             # Customer-facing price each (margin included)
             qty = l["quantity"] or 1
             l["price_each"] = round((l["margin_total"] or 0) / qty, 2)
+
+        cur.execute("""
+            SELECT a.id, a.name, a.parent_assembly_id, a.qty, a.sort_order,
+                   aq.builds AS saved_builds, aq.margin_pct, aq.own_cost,
+                   aq.rolled_cost, aq.rolled_margin_total, aq.breakdown,
+                   aq.weld_time_mins, aq.fab_time_mins, aq.machine_time_mins,
+                   aq.finish_cost, aq.misc_cost
+            FROM assembly_quotes aq
+            JOIN assemblies a ON a.id = aq.assembly_id
+            WHERE aq.quote_batch_id = %s
+            ORDER BY a.sort_order, a.id
+        """, (batch_id,))
+        assembly_lines = _assembly_tree([dict(r) for r in cur.fetchall()])
+        for a in assembly_lines:
+            # Show the builds count the quote was saved with, if any
+            a["builds"] = a["saved_builds"] or a["builds"]
+            a["price_each"] = round((a["rolled_margin_total"] or 0)
+                                    / max(a["builds"], 1), 2)
     cur.close(); conn.close()
-    return batch, lines
+    return batch, lines, assembly_lines
+
+
+def quote_display_rows(lines, assembly_lines):
+    """Interleave assembly header rows with their part lines, depth-first;
+    parts in no (or an unsaved) assembly follow at the end at depth 0."""
+    parts_of: dict = {}
+    for l in lines:
+        parts_of.setdefault(l.get("assembly_id"), []).append(l)
+
+    rows, shown = [], set()
+    for a in assembly_lines:   # already tree-ordered with depth
+        a["n_parts"] = len(parts_of.get(a["id"], []))
+        a["n_subs"]  = sum(1 for o in assembly_lines
+                           if o["parent_assembly_id"] == a["id"])
+        rows.append({"type": "assembly", "depth": a["depth"], "a": a})
+        for l in parts_of.get(a["id"], []):
+            rows.append({"type": "part", "depth": a["depth"] + 1, "l": l})
+            shown.add(l["id"])
+    for l in lines:
+        if l["id"] not in shown:
+            rows.append({"type": "part", "depth": 0, "l": l})
+    return rows
 
 
 def _quote_filename(batch) -> str:
@@ -930,7 +1608,7 @@ async def quote_meta(request: Request, batch_id: int):
 
 
 @app.get("/quotes")
-async def quotes_list(request: Request):
+def quotes_list(request: Request):
     conn = get_db()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -947,10 +1625,11 @@ async def quotes_list(request: Request):
 
 
 @app.post("/quotes/{batch_id}/delete")
-async def quote_delete(batch_id: int):
+def quote_delete(batch_id: int):
     conn = get_db()
     cur  = conn.cursor()
     cur.execute("DELETE FROM quotes WHERE quote_batch_id = %s", (batch_id,))
+    cur.execute("DELETE FROM assembly_quotes WHERE quote_batch_id = %s", (batch_id,))
     cur.execute("DELETE FROM quote_batches WHERE id = %s", (batch_id,))
     deleted = cur.rowcount
     conn.commit()
@@ -961,12 +1640,13 @@ async def quote_delete(batch_id: int):
 
 
 @app.get("/quotes/{batch_id}")
-async def quote_detail(request: Request, batch_id: int):
-    batch, lines = fetch_quote_batch(batch_id)
+def quote_detail(request: Request, batch_id: int):
+    batch, lines, assembly_lines = fetch_quote_batch(batch_id)
     if not batch:
         return JSONResponse({"error": "Not found"}, status_code=404)
     return templates.TemplateResponse(request, "quote.html", {
         "batch": batch, "lines": lines,
+        "rows":  quote_display_rows(lines, assembly_lines),
     })
 
 
@@ -974,18 +1654,29 @@ _EXPORT_HEADERS = ["Part No", "Rev", "Description", "Material", "Thk (mm)", "Qty
                    "Cost / Part", "Line Cost", "With Margin", "Margin %"]
 
 
-def _export_rows(lines):
-    for l in lines:
-        yield [l["part_number"], l["revision"] or "", l["description"] or "",
-               l["material"] or "", l["thickness_mm"], l["quantity"],
-               l["cost_per_part"], l["line_cost"], l["margin_total"], l["margin_pct"]]
+def _export_rows(rows):
+    """Flatten display rows (assemblies + parts) for CSV export, indenting by depth."""
+    for r in rows:
+        pad = "  " * r["depth"]
+        if r["type"] == "assembly":
+            a = r["a"]
+            yield [pad + "[ASSY] " + a["name"], "", "Assembly - weld/fab/machine/finish",
+                   "", "", a["builds"],
+                   round((a["rolled_cost"] or 0) / max(a["builds"], 1), 2),
+                   a["rolled_cost"], a["rolled_margin_total"], a["margin_pct"]]
+        else:
+            l = r["l"]
+            yield [pad + l["part_number"], l["revision"] or "", l["description"] or "",
+                   l["material"] or "", l["thickness_mm"], l["quantity"],
+                   l["cost_per_part"], l["line_cost"], l["margin_total"], l["margin_pct"]]
 
 
 @app.get("/quotes/{batch_id}/export.csv")
-async def quote_export_csv(batch_id: int):
-    batch, lines = fetch_quote_batch(batch_id)
+def quote_export_csv(batch_id: int):
+    batch, lines, assembly_lines = fetch_quote_batch(batch_id)
     if not batch:
         return JSONResponse({"error": "Not found"}, status_code=404)
+    rows = quote_display_rows(lines, assembly_lines)
 
     buf = io.StringIO()
     w   = csv.writer(buf)
@@ -999,7 +1690,7 @@ async def quote_export_csv(batch_id: int):
     w.writerow(["Rate set",      batch["rate_name"] or ""])
     w.writerow([])
     w.writerow(_EXPORT_HEADERS)
-    for row in _export_rows(lines):
+    for row in _export_rows(rows):
         w.writerow(row)
     w.writerow([])
     w.writerow(["Totals", "", "", "", "", "", "", batch["subtotal"], batch["total_with_margin"], ""])
@@ -1009,7 +1700,9 @@ async def quote_export_csv(batch_id: int):
     })
 
 
-# breakdown key → JMS Summary-sheet process row (same order as their workbook)
+# breakdown key → JMS Summary-sheet process row (same order as their workbook).
+# "fab" is assembly-level fabrication; "assembly"/"weld"/"machine"/"finish" also
+# appear in legacy part-level breakdowns and in assembly-level breakdowns.
 _JMS_PROCESS_ROWS = [
     ("Laser cut",   ("laser",)),
     ("Tube cut",    ("tube",)),
@@ -1017,7 +1710,7 @@ _JMS_PROCESS_ROWS = [
     ("Saw cut",     ("saw",)),
     ("Machine",     ("machine",)),
     ("Welding",     ("weld",)),
-    ("Assembly",    ("assembly",)),
+    ("Assembly",    ("assembly", "fab")),
     ("Finishing",   ("finish",)),
     ("Misc",        ("misc", "sticker", "delivery", "purchased")),
 ]
@@ -1054,10 +1747,11 @@ def _material_price_rows(mat_row: dict):
 
 
 @app.get("/quotes/{batch_id}/export.xlsx")
-async def quote_export_xlsx(batch_id: int):
-    batch, lines = fetch_quote_batch(batch_id)
+def quote_export_xlsx(batch_id: int):
+    batch, lines, assembly_lines = fetch_quote_batch(batch_id)
     if not batch:
         return JSONResponse({"error": "Not found"}, status_code=404)
+    display_rows = quote_display_rows(lines, assembly_lines)
 
     conn = get_db()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -1089,8 +1783,8 @@ async def quote_export_xlsx(batch_id: int):
     ws["B5"].font = ws["C5"].font = bold
 
     totals = {}
-    for l in lines:
-        for key, val in (l["breakdown"] or {}).items():
+    for item in lines + assembly_lines:
+        for key, val in (item["breakdown"] or {}).items():
             totals[key] = totals.get(key, 0.0) + (val or 0)
 
     r = 6
@@ -1130,16 +1824,28 @@ async def quote_export_xlsx(batch_id: int):
     for col, width in (("B", 28.9), ("C", 14), ("D", 14), ("G", 19.9), ("H", 10.7)):
         ws.column_dimensions[col].width = width
 
-    # ── Parts sheet — customer-facing line items ──
+    # ── Parts sheet — customer-facing line items (assembly tree order) ──
+    # Assembly rows carry the rolled-up subtotal (own processes + contents);
+    # the indented part rows beneath show the make-up, so only top-level rows
+    # (depth 0) sum to the NET total.
     ps = wb.create_sheet("Parts")
     ps.append(["Line", "Part Ref", "Description", "Material", "Thk (mm)",
                "Rev No.", "Qty.", "Price ea", "Subtotal"])
     for cell in ps[1]:
         cell.font = bold
-    for i, l in enumerate(lines, start=1):
-        ps.append([i, l["part_number"], l["description"] or "", l["material"] or "",
-                   l["thickness_mm"], l["revision"] or "", l["quantity"],
-                   l["price_each"], l["margin_total"]])
+    for i, r in enumerate(display_rows, start=1):
+        pad = "    " * r["depth"]
+        if r["type"] == "assembly":
+            a = r["a"]
+            ps.append([i, pad + "⌞ " + a["name"] if r["depth"] else pad + a["name"],
+                       "Assembly", "", "", "", a["builds"],
+                       a["price_each"], a["rolled_margin_total"]])
+            ps.cell(row=ps.max_row, column=2).font = bold
+        else:
+            l = r["l"]
+            ps.append([i, pad + l["part_number"], l["description"] or "",
+                       l["material"] or "", l["thickness_mm"], l["revision"] or "",
+                       l["quantity"], l["price_each"], l["margin_total"]])
         ps.cell(row=ps.max_row, column=8).number_format = _GBP_FMT
         ps.cell(row=ps.max_row, column=9).number_format = _GBP_FMT
     ps.append([])
@@ -1161,6 +1867,20 @@ async def quote_export_xlsx(batch_id: int):
         bd = l["breakdown"] or {}
         bs.append([l["part_number"], l["material_cost_m2"]]
                   + [bd.get(p) for p in procs] + [l["line_cost"]])
+
+    # Assembly-level process costs (weld / fabrication / machine / finish)
+    if assembly_lines:
+        bs.append([])
+        bs.append(["Assembly", "Builds", "Weld", "Fabrication", "Machine",
+                   "Finish", "Misc", "Own Cost", "Rolled Cost"])
+        for cell in bs[bs.max_row]:
+            cell.font = bold
+        for a in assembly_lines:
+            bd = a["breakdown"] or {}
+            bs.append(["  " * a["depth"] + a["name"], a["builds"],
+                       bd.get("weld"), bd.get("fab"), bd.get("machine"),
+                       bd.get("finish"), bd.get("misc"),
+                       a["own_cost"], a["rolled_cost"]])
     bs.column_dimensions["A"].width = 16
     bs.column_dimensions["B"].width = 13
 

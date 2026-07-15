@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+
+{% block header_nav %}
+<a href="/assemblies/{{ nest_id }}" class="back-link">← Structure</a>
+{% endblock %}
+
+{% block content %}
+<div class="review-page">
+
+  <p class="eyebrow">Assembly Pricing</p>
+  <h1 class="review-title">{{ assembly.name }}</h1>
+  <p class="review-subtext">Welding, fabrication, machining and finishing for this assembly
+    as a whole. Times and costs are <strong>per assembly built</strong> — they are multiplied
+    by the {{ assembly.builds }} build{{ 's' if assembly.builds != 1 }} this order needs.
+    Cut &amp; fold stays on the individual parts.</p>
+
+  <div class="assy-price-layout">
+
+    <div class="assy-price-main">
+
+      <!-- ── Contents ──────────────────────────────── -->
+      <div class="assy-panel">
+        <div class="assy-panel-head"><span class="assy-panel-title">Contents</span></div>
+        <table>
+          <tbody>
+            {% for c in child_assemblies %}
+            <tr>
+              <td class="cell-mono">⌞ {{ c.name }}</td>
+              <td>Sub-assembly × {{ c.qty }}</td>
+              <td class="cell-action">
+                <a class="btn-assign" href="/price/{{ nest_id }}/assembly/{{ c.id }}">Price →</a>
+              </td>
+            </tr>
+            {% endfor %}
+            {% for p in child_parts %}
+            <tr>
+              <td class="cell-mono">{{ p.part_number }}</td>
+              <td>{{ p.description or 'Part' }} × {{ p.total_qty }}</td>
+              <td></td>
+            </tr>
+            {% endfor %}
+            {% if not child_parts and not child_assemblies %}
+            <tr><td colspan="3">Nothing assigned to this assembly yet —
+              <a href="/assemblies/{{ nest_id }}">assign parts</a>.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ── Assembly processes ─────────────────────── -->
+      <div class="assy-panel">
+        <div class="assy-panel-head"><span class="assy-panel-title">Assembly Processes</span></div>
+
+        <div class="proc-toggles">
+          <button class="proc-btn" data-proc="weld">Weld</button>
+          <button class="proc-btn" data-proc="fab">Fabrication</button>
+          <button class="proc-btn" data-proc="machine">Machine</button>
+          <button class="proc-btn" data-proc="finish">Finishing</button>
+        </div>
+
+        <div class="proc-form" id="proc-weld">
+          <p class="proc-form-title">Weld</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">Weld Time (min / build)</label>
+              <input class="price-input" id="weld_time_mins" type="number" min="0" step="0.1" placeholder="0">
+            </div>
+          </div>
+        </div>
+
+        <div class="proc-form" id="proc-fab">
+          <p class="proc-form-title">Fabrication / Assembly</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">Fab Time (min / build)</label>
+              <input class="price-input" id="fab_time_mins" type="number" min="0" step="0.1" placeholder="0">
+            </div>
+          </div>
+        </div>
+
+        <div class="proc-form" id="proc-machine">
+          <p class="proc-form-title">Machine</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">Machine Time (min / build)</label>
+              <input class="price-input" id="machine_time_mins" type="number" min="0" step="0.1" placeholder="0">
+            </div>
+          </div>
+        </div>
+
+        <div class="proc-form" id="proc-finish">
+          <p class="proc-form-title">Finishing</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">Finish Cost (£ / build)</label>
+              <input class="price-input" id="finish_cost" type="number" min="0" step="0.01" placeholder="0.00">
+            </div>
+          </div>
+          <p class="field-hint">Marked up by the finishing factor from the active rate set.</p>
+        </div>
+
+        <div class="proc-fields" style="margin-top:16px">
+          <div class="field-block">
+            <label class="field-label">Misc (£ / build)</label>
+            <input class="price-input" id="misc_cost" type="number" min="0" step="0.01" placeholder="0.00">
+          </div>
+          <div class="field-block">
+            <label class="field-label">Margin %</label>
+            <input class="price-input" id="margin_pct" type="number" min="0" step="0.1" placeholder="10">
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── Price sidebar ───────────────────────────── -->
+    <div class="price-sidebar">
+      <div class="psb-item">
+        <span class="psb-label">Cost / Build</span>
+        <span class="psb-value" id="disp-cpb">—</span>
+      </div>
+      <div class="psb-item">
+        <span class="psb-label">Assembly Work × {{ assembly.builds }}</span>
+        <span class="psb-value" id="disp-own">—</span>
+      </div>
+      <div class="psb-item">
+        <span class="psb-label">With <span id="disp-mpct">10</span>% Margin</span>
+        <span class="psb-value psb-margin" id="disp-margin">—</span>
+      </div>
+      <div class="ps-note" style="padding:10px 12px 0;text-align:center">
+        Part costs roll up on the review page
+      </div>
+    </div>
+
+  </div>
+
+</div>
+
+<!-- ── Navigation bar ──────────────────────────── -->
+<div class="price-nav">
+  {% if prev_id %}
+  <a href="/price/{{ nest_id }}/assembly/{{ prev_id }}" class="pnav-btn">← Prev assembly</a>
+  {% else %}
+  <span class="pnav-btn pnav-disabled">← Prev assembly</span>
+  {% endif %}
+
+  <select class="pnav-select" onchange="if (this.value) window.location = '/price/' + {{ nest_id }} + '/assembly/' + this.value">
+    {% for a in assemblies %}
+    <option value="{{ a.id }}" {% if a.id == assembly.id %}selected{% endif %}>
+      Assembly {{ loop.index }} of {{ assemblies | length }} · {{ a.name }}
+    </option>
+    {% endfor %}
+  </select>
+
+  <a href="/price/{{ nest_id }}/review" class="pnav-btn">Review all</a>
+
+  {% if next_id %}
+  <a href="/price/{{ nest_id }}/assembly/{{ next_id }}" class="pnav-btn pnav-primary">Save &amp; next →</a>
+  {% else %}
+  <a href="/price/{{ nest_id }}/review" class="pnav-btn pnav-primary">Review all →</a>
+  {% endif %}
+</div>
+
+<style>
+  .assy-panel {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    margin: 0 0 20px;
+    padding: 16px 20px 20px;
+  }
+  .assy-panel-head { margin-bottom: 10px; }
+  .assy-panel-title {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--steel);
+  }
+  .assy-price-layout { display: flex; gap: 20px; align-items: flex-start; margin-top: 18px; }
+  .assy-price-main   { flex: 1; min-width: 0; }
+  .assy-price-layout .price-sidebar { width: 220px; flex-shrink: 0; }
+</style>
+
+<script type="application/json" id="assy-price-data">{
+  "nestId":     {{ nest_id }},
+  "assemblyId": {{ assembly.id }},
+  "builds":     {{ assembly.builds }},
+  "saved":      {{ saved_state | tojson }}
+}</script>
+
+<script>
+const S = JSON.parse(document.getElementById('assy-price-data').textContent);
+const SESSION_KEY = 'assy_' + S.nestId + '_' + S.assemblyId;
+
+const DEFAULTS = {
+  weld_time_mins: 0, fab_time_mins: 0, machine_time_mins: 0,
+  finish_cost: 0, misc_cost: 0, margin_pct: 10,
+  active_processes: [],
+};
+
+let state = (() => {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  const saved = Object.fromEntries(
+    Object.entries(S.saved || {}).filter(([, v]) => v != null));
+  return { ...DEFAULTS, ...saved };
+})();
+
+function fv(id) { return parseFloat(document.getElementById(id)?.value) || 0; }
+function sv(id, v) { const el = document.getElementById(id); if (el && v != null) el.value = v; }
+
+function collect() {
+  const active = [...document.querySelectorAll('.proc-btn.proc-on')].map(b => b.dataset.proc);
+  return {
+    assembly_id:       S.assemblyId,
+    builds:            S.builds,
+    weld_time_mins:    fv('weld_time_mins'),
+    fab_time_mins:     fv('fab_time_mins'),
+    machine_time_mins: fv('machine_time_mins'),
+    finish_cost:       fv('finish_cost'),
+    misc_cost:         fv('misc_cost'),
+    margin_pct:        fv('margin_pct'),
+    active_processes:  active,
+  };
+}
+
+function initForm() {
+  sv('weld_time_mins',    state.weld_time_mins);
+  sv('fab_time_mins',     state.fab_time_mins);
+  sv('machine_time_mins', state.machine_time_mins);
+  sv('finish_cost',       state.finish_cost);
+  sv('misc_cost',         state.misc_cost);
+  sv('margin_pct',        state.margin_pct);
+
+  const active = state.active_processes || [];
+  document.querySelectorAll('.proc-btn').forEach(btn => {
+    const on = active.includes(btn.dataset.proc);
+    btn.classList.toggle('proc-on', on);
+    const form = document.getElementById('proc-' + btn.dataset.proc);
+    if (form) form.style.display = on ? 'block' : 'none';
+  });
+
+  recalculate();
+}
+
+let calcTimer = null;
+function scheduleCalc() { clearTimeout(calcTimer); calcTimer = setTimeout(recalculate, 350); }
+
+async function recalculate() {
+  const data = collect();
+  try {
+    const res = await fetch('/price/assembly/calculate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    const r = await res.json();
+    if (r.error) return;
+
+    const fmt = n => '£' + n.toFixed(2);
+    document.getElementById('disp-cpb').textContent    = fmt(r.cost_per_build);
+    document.getElementById('disp-own').textContent    = fmt(r.own_cost);
+    document.getElementById('disp-margin').textContent = fmt(r.own_margin_total);
+    document.getElementById('disp-mpct').textContent   = data.margin_pct || 10;
+
+    state = { ...data, cost_per_build: r.cost_per_build, own_cost: r.own_cost,
+              own_margin_total: r.own_margin_total };
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(state));
+  } catch {}
+}
+
+document.querySelectorAll('.proc-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const on   = btn.classList.toggle('proc-on');
+    const form = document.getElementById('proc-' + btn.dataset.proc);
+    if (form) form.style.display = on ? 'block' : 'none';
+    scheduleCalc();
+  });
+});
+
+document.querySelectorAll('.price-input').forEach(el => {
+  el.addEventListener('input', scheduleCalc);
+});
+
+initForm();
+</script>
+{% endblock %}

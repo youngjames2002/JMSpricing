@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+
+{% block header_nav %}
+<a href="/match/{{ nest_id }}" class="back-link">← Match</a>
+{% endblock %}
+
+{% block content %}
+<div class="review-page">
+
+  <p class="eyebrow">Order Structure</p>
+  <h1 class="review-title">Assemblies</h1>
+  <p class="review-subtext">Group parts into assemblies — assemblies can sit inside other
+    assemblies. Cut &amp; fold is priced on each part; welding, fabrication, machining and
+    finishing are priced on the assembly as a whole. Skip this step if the order is loose
+    parts only.</p>
+
+  <!-- ── Messages ──────────────────────────────────────── -->
+  <div class="assy-msg" id="assy-msg" style="display:none"></div>
+
+  <!-- ── Assembly tree ─────────────────────────────────── -->
+  <div class="assy-panel">
+    <div class="assy-panel-head">
+      <span class="assy-panel-title">Assembly Tree</span>
+      <button class="btn-add" id="btn-autodetect" onclick="autoDetect()">⟳ Auto-detect from drawings</button>
+    </div>
+    <p class="review-subtext" style="margin:0 0 10px;font-size:12px">
+      Assembly drawings with a parts list (or an ASSY / WELDMENT title) are detected
+      automatically when the order is confirmed — auto-detect re-scans the uploaded
+      drawings without touching anything you've placed manually.</p>
+
+    <!-- Inline add form -->
+    <form class="assy-add-form" onsubmit="addAssembly(event)">
+      <div class="field-block" style="flex:1">
+        <label class="field-label" for="new-assy-name">New assembly name</label>
+        <input class="ph-input assy-name" id="new-assy-name" type="text"
+               placeholder='e.g. "Hopper Weldment"' style="width:100%">
+      </div>
+      <div class="field-block">
+        <label class="field-label" for="new-assy-parent">Inside</label>
+        <select class="assy-select" id="new-assy-parent">
+          <option value="">— top level —</option>
+          {% for a in assemblies %}
+          <option value="{{ a.id }}">{{ ('&nbsp;&nbsp;' * a.depth) | safe }}{{ a.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field-block">
+        <label class="field-label" for="new-assy-qty">Qty / parent</label>
+        <input class="ph-input assy-qty" id="new-assy-qty" type="number" min="1" step="1" value="1">
+      </div>
+      <button class="btn-add" type="submit">+ Add assembly</button>
+    </form>
+
+    {% if assemblies %}
+    <table>
+      <thead>
+        <tr>
+          <th>Assembly</th>
+          <th>Inside</th>
+          <th style="text-align:right">Qty / Parent</th>
+          <th style="text-align:right">Total Builds</th>
+          <th style="text-align:right">Parts</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in assemblies %}
+        <tr>
+          <td>
+            <span class="assy-indent">{% for _ in range(a.depth) %}<span class="assy-tick"></span>{% endfor %}</span>
+            <input class="ph-input assy-name" data-id="{{ a.id }}" type="text"
+                   value="{{ a.name }}" onchange="updateAssembly({{ a.id }}, {name: this.value})">
+            {% if a.auto_detected %}<span class="badge badge-neutral" title="Detected from the drawing's parts list">auto</span>{% endif %}
+          </td>
+          <td>
+            <select class="assy-select" onchange="updateAssembly({{ a.id }}, {parent_assembly_id: this.value || null})">
+              <option value="">— top level —</option>
+              {% for other in assemblies %}{% if other.id != a.id %}
+              <option value="{{ other.id }}" {% if a.parent_assembly_id == other.id %}selected{% endif %}>{{ other.name }}</option>
+              {% endif %}{% endfor %}
+            </select>
+          </td>
+          <td style="text-align:right">
+            <input class="ph-input assy-qty" type="number" min="1" step="1" value="{{ a.qty }}"
+                   onchange="updateAssembly({{ a.id }}, {qty: parseInt(this.value) || 1})">
+          </td>
+          <td class="cell-num">{{ a.builds }}</td>
+          <td class="cell-num">{{ a.part_count }}</td>
+          <td class="cell-action">
+            <button class="btn-assign assy-del" data-id="{{ a.id }}"
+                    onclick="deleteAssembly(this, {{ a.id }})">Delete</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="review-subtext" style="margin:14px 0 4px">No assemblies yet — parts will be quoted as loose items.</p>
+    {% endif %}
+  </div>
+
+  <!-- ── Part assignment ───────────────────────────────── -->
+  <div class="assy-panel">
+    <div class="assy-panel-head">
+      <span class="assy-panel-title">Assign Parts</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Part No</th>
+          <th>Description</th>
+          <th>Material</th>
+          <th style="text-align:right">Qty</th>
+          <th>Assembly</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in parts %}
+        <tr>
+          <td class="cell-mono">{{ p.part_number }}</td>
+          <td>{{ p.description or '—' }}</td>
+          <td class="cell-mono">{{ p.material or '—' }}</td>
+          <td class="cell-num">{{ p.total_qty }}</td>
+          <td>
+            <select class="assy-select" onchange="assignPart({{ p.id }}, this.value)">
+              <option value="">— loose part —</option>
+              {% for a in assemblies %}
+              <option value="{{ a.id }}" {% if p.assembly_id == a.id %}selected{% endif %}>
+                {{ ('&nbsp;&nbsp;' * a.depth) | safe }}{{ a.name }}
+              </option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="review-actions">
+    <a href="/match/{{ nest_id }}" class="btn-back">← Back to match</a>
+    <a href="/price/{{ nest_id }}/1" class="btn-generate">Continue to pricing →</a>
+  </div>
+
+</div>
+
+<style>
+  .assy-panel {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    margin: 18px 0 26px;
+    padding: 16px 20px 20px;
+  }
+  .assy-panel-head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 10px;
+  }
+  .assy-panel-title {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--steel);
+  }
+  .assy-indent { display: inline-block; vertical-align: middle; }
+  .assy-tick {
+    display: inline-block; width: 18px; height: 1px;
+    border-bottom: 1px solid var(--steel-2); margin: 0 2px 4px 6px;
+  }
+  .assy-name { width: 220px; border: 1px solid var(--line); padding: 4px 8px; }
+  .assy-qty  { width: 70px;  border: 1px solid var(--line); padding: 4px 8px; text-align: right; }
+  .assy-select {
+    font: inherit; padding: 4px 8px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--ink); max-width: 240px;
+  }
+  .assy-add-form {
+    display: flex; gap: 14px; align-items: flex-end;
+    padding: 12px 0 16px; margin-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+  }
+  .assy-add-form .btn-add { margin-bottom: 2px; }
+  .assy-msg {
+    border: 1px solid var(--line);
+    padding: 10px 14px; margin: 14px 0 0;
+    font-size: 13px; white-space: pre-line;
+  }
+  .assy-msg-ok    { border-color: #1d7a3a; background: #f0faf4; color: #1d7a3a; }
+  .assy-msg-error { border-color: #b83232; background: #fff5f5; color: #b83232; }
+  .assy-del-confirm { border-color: #b83232 !important; color: #b83232 !important; }
+</style>
+
+<script type="application/json" id="assy-data">{"nestId": {{ nest_id }}}</script>
+
+<script>
+const NEST_ID   = JSON.parse(document.getElementById('assy-data').textContent).nestId;
+const FLASH_KEY = 'assy_flash_' + NEST_ID;
+
+// ── In-page messages (no browser popups) ────────────────
+function showMsg(text, type = 'ok') {
+  const el = document.getElementById('assy-msg');
+  el.textContent = text;
+  el.className   = 'assy-msg ' + (type === 'error' ? 'assy-msg-error' : 'assy-msg-ok');
+  el.style.display = 'block';
+  el.scrollIntoView({ block: 'nearest' });
+}
+
+// Message that survives the page reload after a change
+function flashAndReload(text, type = 'ok') {
+  try { sessionStorage.setItem(FLASH_KEY, JSON.stringify({ text, type })); } catch {}
+  window.location.reload();
+}
+
+(() => {
+  try {
+    const raw = sessionStorage.getItem(FLASH_KEY);
+    if (raw) {
+      sessionStorage.removeItem(FLASH_KEY);
+      const { text, type } = JSON.parse(raw);
+      showMsg(text, type);
+    }
+  } catch {}
+})();
+
+async function post(url, body) {
+  let res, r;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    r = await res.json().catch(() => ({}));
+  } catch {
+    showMsg('Request failed — is the server running?', 'error');
+    return null;
+  }
+  if (!res.ok || r.error) { showMsg(r.error || 'Request failed', 'error'); return null; }
+  return r;
+}
+
+async function autoDetect() {
+  const btn = document.getElementById('btn-autodetect');
+  btn.disabled = true; btn.textContent = 'Scanning drawings…';
+  const r = await post('/assemblies/' + NEST_ID + '/autodetect', {});
+  if (r) {
+    flashAndReload(
+      `Scan complete: ${r.assemblies_detected} assembly drawing(s) found · `
+      + `${r.assemblies_created} new assembly(ies) created · `
+      + `${r.parts_assigned} part(s) assigned · `
+      + `${r.sub_assemblies_linked} sub-assembly link(s) made`);
+  } else {
+    btn.disabled = false; btn.textContent = '⟳ Auto-detect from drawings';
+  }
+}
+
+async function addAssembly(event) {
+  event.preventDefault();
+  const nameEl = document.getElementById('new-assy-name');
+  const name   = nameEl.value.trim();
+  if (!name) {
+    showMsg('Enter a name for the new assembly.', 'error');
+    nameEl.focus();
+    return;
+  }
+  const parent = document.getElementById('new-assy-parent').value;
+  const qty    = parseInt(document.getElementById('new-assy-qty').value) || 1;
+  const r = await post('/assemblies', {
+    nest_id: NEST_ID, name: name, qty: qty,
+    parent_assembly_id: parent ? parseInt(parent) : null,
+  });
+  if (r) flashAndReload(`Assembly "${name}" created.`);
+}
+
+async function updateAssembly(id, fields) {
+  const r = await post('/assemblies/' + id + '/update', fields);
+  if (r) flashAndReload('Assembly updated.');
+}
+
+// Two-click delete: first click arms the button, second confirms
+async function deleteAssembly(btn, id) {
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    btn.textContent = 'Confirm delete?';
+    btn.classList.add('assy-del-confirm');
+    showMsg('Deleting an assembly frees its parts (they become loose) and moves any '
+          + 'sub-assemblies up a level. Click "Confirm delete?" to go ahead.', 'error');
+    setTimeout(() => {
+      btn.dataset.armed = '';
+      btn.textContent = 'Delete';
+      btn.classList.remove('assy-del-confirm');
+    }, 4000);
+    return;
+  }
+  const r = await post('/assemblies/' + id + '/delete', {});
+  if (r) flashAndReload('Assembly deleted — its parts are loose again.');
+}
+
+async function assignPart(partId, assemblyId) {
+  const r = await post('/assemblies/' + NEST_ID + '/assign', {
+    nest_part_id: partId,
+    assembly_id:  assemblyId ? parseInt(assemblyId) : null,
+  });
+  if (r) showMsg('Part assignment saved.');
+}
+</script>
+{% endblock %}

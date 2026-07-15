@@ -145,11 +145,9 @@
         <div class="proc-toggles">
           <button class="proc-btn" data-proc="fold">Fold</button>
           <button class="proc-btn" data-proc="tube">Tube</button>
-          <button class="proc-btn" data-proc="weld">Weld</button>
           <button class="proc-btn" data-proc="saw">Saw</button>
-          <button class="proc-btn" data-proc="machine">Machine</button>
-          <button class="proc-btn" data-proc="assembly">Assembly</button>
-          <span class="ps-note" style="margin-left:auto;align-self:center">Laser always on</span>
+          <span class="ps-note" style="margin-left:auto;align-self:center">Laser always on
+            · weld / fab / machine / finishing are priced on the assembly</span>
         </div>
 
         <div class="proc-form" id="proc-fold">
@@ -195,16 +193,6 @@
           </div>
         </div>
 
-        <div class="proc-form" id="proc-weld">
-          <p class="proc-form-title">Weld</p>
-          <div class="proc-fields">
-            <div class="field-block">
-              <label class="field-label">Weld Time (min)</label>
-              <input class="price-input" id="weld_time_mins" type="number" min="0" step="0.1" placeholder="0">
-            </div>
-          </div>
-        </div>
-
         <div class="proc-form" id="proc-saw">
           <p class="proc-form-title">Saw</p>
           <div class="proc-fields">
@@ -223,25 +211,6 @@
           </div>
         </div>
 
-        <div class="proc-form" id="proc-machine">
-          <p class="proc-form-title">Machine</p>
-          <div class="proc-fields">
-            <div class="field-block">
-              <label class="field-label">Machine Time (min)</label>
-              <input class="price-input" id="machine_time_mins" type="number" min="0" step="0.1" placeholder="0">
-            </div>
-          </div>
-        </div>
-
-        <div class="proc-form" id="proc-assembly">
-          <p class="proc-form-title">Assembly</p>
-          <div class="proc-fields">
-            <div class="field-block">
-              <label class="field-label">Assembly Time (min)</label>
-              <input class="price-input" id="assembly_time_mins" type="number" min="0" step="0.1" placeholder="0">
-            </div>
-          </div>
-        </div>
       </div>
 
     </div><!-- /cards-main -->
@@ -263,6 +232,11 @@
         <span class="psb-value psb-margin" id="disp-margin">—</span>
       </div>
       <div class="psb-status" id="disp-status">—</div>
+      {% if part.assembly_name %}
+      <div class="ps-note" style="padding:10px 12px 0;text-align:center">
+        Part of assembly · <strong>{{ part.assembly_name }}</strong>
+      </div>
+      {% endif %}
       <div class="ps-note" id="history-note"
            style="display:none;padding:10px 12px 0;text-align:center"></div>
     </div>
@@ -289,7 +263,9 @@
   <a href="/price/{{ nest_id }}/review" class="pnav-btn" onclick="persistState()">Review all</a>
 
   <button class="pnav-btn pnav-primary" onclick="saveAndNext()">
-    {% if part_index < total_parts %}Save &amp; next →{% else %}Review all →{% endif %}
+    {% if part_index < total_parts %}Save &amp; next →
+    {% elif first_assembly_id %}Price assemblies →
+    {% else %}Review all →{% endif %}
   </button>
 </div>
 
@@ -305,6 +281,7 @@
   "matCost":     {{ material_cost | tojson }},
   "bendCount":   {{ part.bend_count or 0 }},
   "bending":     {{ 'true' if part.bending_required else 'false' }},
+  "firstAssemblyId": {{ first_assembly_id | tojson }},
   "saved":       {{ saved_state | tojson }}
 }</script>
 
@@ -325,9 +302,7 @@ const DEFAULTS = {
   margin_pct:         10,
   active_processes:   S.bending && S.bendCount > 0 ? ['fold'] : [],
   tube_cut_time_mins: 0, tube_kg_per_metre: 0, tube_length_m: 0, tube_cost_per_kg: 0,
-  weld_time_mins:     0,
   saw_num_cuts:       0, saw_mins_per_cut: 0, saw_setup_mins: 0,
-  machine_time_mins:  0, assembly_time_mins: 0,
 };
 
 // Saved quote line from the DB (null if this part was never saved) —
@@ -396,12 +371,9 @@ function collect() {
     tube_kg_per_metre:    fv('tube_kg_per_metre'),
     tube_length_m:        fv('tube_length_m'),
     tube_cost_per_kg:     fv('tube_cost_per_kg'),
-    weld_time_mins:       fv('weld_time_mins'),
     saw_num_cuts:         iv('saw_num_cuts'),
     saw_mins_per_cut:     fv('saw_mins_per_cut'),
     saw_setup_mins:       fv('saw_setup_mins'),
-    machine_time_mins:    fv('machine_time_mins'),
-    assembly_time_mins:   fv('assembly_time_mins'),
   };
 }
 
@@ -431,12 +403,9 @@ function initForm() {
   sv('tube_kg_per_metre',  state.tube_kg_per_metre);
   sv('tube_length_m',      state.tube_length_m);
   sv('tube_cost_per_kg',   state.tube_cost_per_kg);
-  sv('weld_time_mins',     state.weld_time_mins);
   sv('saw_num_cuts',       state.saw_num_cuts);
   sv('saw_mins_per_cut',   state.saw_mins_per_cut);
   sv('saw_setup_mins',     state.saw_setup_mins);
-  sv('machine_time_mins',  state.machine_time_mins);
-  sv('assembly_time_mins', state.assembly_time_mins);
 
   const active = state.active_processes || [];
   document.querySelectorAll('.proc-btn').forEach(btn => {
@@ -531,9 +500,10 @@ function persistState() { sessionStorage.setItem(SESSION_KEY, JSON.stringify(sta
 
 function saveAndNext() {
   persistState();
-  const next = S.partIndex < S.totalParts
-    ? `/price/${S.nestId}/${S.partIndex + 1}`
-    : `/price/${S.nestId}/review`;
+  let next;
+  if (S.partIndex < S.totalParts)  next = `/price/${S.nestId}/${S.partIndex + 1}`;
+  else if (S.firstAssemblyId)      next = `/price/${S.nestId}/assembly/${S.firstAssemblyId}`;
+  else                             next = `/price/${S.nestId}/review`;
   window.location.href = next;
 }
 

@@ -24,21 +24,38 @@
   <table>
     <thead>
       <tr>
-        <th>Part No</th>
+        <th>Item</th>
         <th>Rev</th>
         <th>Description</th>
         <th>Material</th>
         <th style="text-align:right">Qty</th>
-        <th style="text-align:right">Cost / Part</th>
+        <th style="text-align:right">Cost / Each</th>
         <th style="text-align:right">Line Cost</th>
         <th style="text-align:right">Price ea</th>
         <th style="text-align:right">With Margin</th>
       </tr>
     </thead>
     <tbody>
-      {% for l in lines %}
+      {% for r in rows %}
+      {% if r.type == 'assembly' %}
+      {% set a = r.a %}
+      <tr class="row-assembly">
+        <td class="cell-mono"><span style="display:inline-block;width:{{ r.depth * 22 }}px"></span>▣ {{ a.name }}</td>
+        <td class="cell-mono">—</td>
+        <td>Assembly · own work £{{ '%.2f' | format(a.own_cost or 0) }}
+          · includes {{ a.n_parts }} part{{ 's' if a.n_parts != 1 }}{% if a.n_subs %}
+          + {{ a.n_subs }} sub-assembl{{ 'ies' if a.n_subs != 1 else 'y' }}{% endif %} below</td>
+        <td></td>
+        <td class="cell-num">{{ a.builds }}</td>
+        <td class="cell-num">£{{ '%.2f' | format((a.rolled_cost or 0) / (a.builds or 1)) }}</td>
+        <td class="cell-num">£{{ '%.2f' | format(a.rolled_cost or 0) }}</td>
+        <td class="cell-num">£{{ '%.2f' | format(a.price_each or 0) }}</td>
+        <td class="cell-num cell-margin">£{{ '%.2f' | format(a.rolled_margin_total or 0) }}</td>
+      </tr>
+      {% else %}
+      {% set l = r.l %}
       <tr>
-        <td class="cell-mono">{{ l.part_number }}</td>
+        <td class="cell-mono"><span style="display:inline-block;width:{{ r.depth * 22 }}px"></span>{{ l.part_number }}</td>
         <td class="cell-mono">{{ l.revision or '—' }}</td>
         <td>{{ l.description or '—' }}</td>
         <td class="cell-mono">{{ l.material or '—' }}</td>
@@ -48,9 +65,12 @@
         <td class="cell-num">£{{ '%.2f' | format(l.price_each or 0) }}</td>
         <td class="cell-num cell-margin">£{{ '%.2f' | format(l.margin_total or 0) }}</td>
       </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>
+  <p class="review-subtext" style="margin-top:8px">Assembly line costs include the parts
+    inside them — the quote totals below count each cost once.</p>
 
   <div class="totals-bar">
     <div class="totals-item">
@@ -161,17 +181,37 @@
       </tr>
     </thead>
     <tbody>
-      {% for l in lines %}
+      {% for r in rows %}
+      {% if r.type == 'assembly' %}
+      {% set a = r.a %}
       <tr>
         <td>{{ loop.index }}.</td>
-        <td>{{ l.part_number }}</td>
+        <td style="padding-left:{{ 4 * r.depth }}mm"><strong>{{ a.name }}</strong></td>
+        <td>Assembly{% if r.depth %} (sub-assembly){% endif %}</td>
+        <td></td>
+        <td class="jms-c">—</td>
+        <td class="jms-c">{{ a.builds }}</td>
+        <td class="jms-r">£{{ '%.2f' | format(a.price_each or 0) }} ea</td>
+        <td class="jms-r">£{{ '%.2f' | format(a.rolled_margin_total or 0) }}</td>
+      </tr>
+      {% else %}
+      {% set l = r.l %}
+      <tr>
+        <td>{{ loop.index }}.</td>
+        <td style="padding-left:{{ 4 * r.depth }}mm">{{ l.part_number }}</td>
         <td>{{ l.description or '' }}</td>
         <td>{{ l.part_number }}</td>
         <td class="jms-c">{{ l.revision or '—' }}</td>
         <td class="jms-c">{{ l.quantity }}</td>
+        {% if r.depth %}
+        <td class="jms-r">Included</td>
+        <td class="jms-r">—</td>
+        {% else %}
         <td class="jms-r">£{{ '%.2f' | format(l.price_each or 0) }} ea</td>
         <td class="jms-r">£{{ '%.2f' | format(l.margin_total or 0) }}</td>
+        {% endif %}
       </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>
@@ -202,6 +242,7 @@
 
 <style>
   .quote-export-btns { display: flex; gap: 12px; align-items: center; }
+  .row-assembly td { background: var(--panel-2); font-weight: 600; }
 
   .quote-doc-details {
     margin: 4px 0 24px;

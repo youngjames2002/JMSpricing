@@ -72,7 +72,17 @@ Pricing factors guidance:
 - process_notes: manufacturing/post-processing notes verbatim - deburring, welding,
   threading, coating/painting, compliance notes (e.g. "MUST COMPLY WITH WMP-2040"),
   "SEE DXF FOR CUT PROFILE", etc.
-- Use empty lists for pricing factor lists with no callouts found."""
+- Use empty lists for pricing factor lists with no callouts found.
+
+Assembly guidance:
+- is_assembly: true only if this page is an assembly/weldment drawing — it shows
+  multiple components put together, has a parts list / bill of materials table
+  (ITEM NO. / PART NUMBER / DESCRIPTION / QTY.), or the title says ASSEMBLY,
+  ASSY or WELDMENT. A single-part drawing is NOT an assembly.
+- bom: every row of the parts list table if one exists. part_number is the
+  drawing/part number column verbatim; qty is the quantity of that component
+  per assembly. Use null for cells that are empty or unreadable. Use an empty
+  list when there is no parts list."""
 
 _TITLE_BLOCK_SCHEMA = {
     "type": "object",
@@ -118,13 +128,37 @@ _PRICING_FACTORS_SCHEMA = {
     "additionalProperties": False,
 }
 
+_ASSEMBLY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_assembly": {"type": "boolean"},
+        "bom": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item_no":     {"type": ["integer", "null"]},
+                    "part_number": {"type": "string"},
+                    "description": {"type": ["string", "null"]},
+                    "qty":         {"type": ["integer", "null"]},
+                },
+                "required": ["item_no", "part_number", "description", "qty"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["is_assembly", "bom"],
+    "additionalProperties": False,
+}
+
 _SCHEMA = {
     "type": "object",
     "properties": {
         "title_block":     _TITLE_BLOCK_SCHEMA,
         "pricing_factors": _PRICING_FACTORS_SCHEMA,
+        "assembly":        _ASSEMBLY_SCHEMA,
     },
-    "required": ["title_block", "pricing_factors"],
+    "required": ["title_block", "pricing_factors", "assembly"],
     "additionalProperties": False,
 }
 
@@ -211,7 +245,7 @@ def extract_page_with_claude(pdf_path: Path, page_index: int) -> dict:
     except json.JSONDecodeError as e:
         raise ClaudeExtractionError(f"unparseable response JSON: {e}") from e
 
-    return {
+    result = {
         "title_block": {
             k: v for k, v in data["title_block"].items() if v is not None
         },
@@ -219,6 +253,12 @@ def extract_page_with_claude(pdf_path: Path, page_index: int) -> dict:
             k: v for k, v in data["pricing_factors"].items() if v not in ([], None)
         },
     }
+    asm = data.get("assembly") or {}
+    bom = [{k: v for k, v in row.items() if v is not None}
+           for row in asm.get("bom") or [] if row.get("part_number")]
+    if asm.get("is_assembly") or bom:
+        result["assembly"] = {"is_assembly": True, "bom": bom}
+    return result
 
 
 if __name__ == "__main__":
