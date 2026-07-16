@@ -142,8 +142,9 @@
           <button class="proc-btn" data-proc="fold">Fold</button>
           <button class="proc-btn" data-proc="tube">Tube</button>
           <button class="proc-btn" data-proc="saw">Saw</button>
+          <button class="proc-btn" data-proc="machine">Machine</button>
           <span class="ps-note" style="margin-left:auto;align-self:center">Laser always on
-            · weld / fab / machine / finishing are priced on the assembly</span>
+            · weld / fab / finishing are priced on the assembly</span>
         </div>
 
         <div class="proc-form" id="proc-fold">
@@ -203,6 +204,16 @@
             <div class="field-block">
               <label class="field-label">Setup (min)</label>
               <input class="price-input" id="saw_setup_mins" type="number" min="0" step="0.1" placeholder="0">
+            </div>
+          </div>
+        </div>
+
+        <div class="proc-form" id="proc-machine">
+          <p class="proc-form-title">Machine</p>
+          <div class="proc-fields">
+            <div class="field-block">
+              <label class="field-label">Time / Part (min)</label>
+              <input class="price-input" id="machine_time_mins" type="number" min="0" step="0.1" placeholder="0">
             </div>
           </div>
         </div>
@@ -298,6 +309,7 @@ const DEFAULTS = {
   active_processes:   S.bending && S.bendCount > 0 ? ['fold'] : [],
   tube_cut_time_mins: 0, tube_kg_per_metre: 0, tube_length_m: 0, tube_cost_per_kg: 0,
   saw_num_cuts:       0, saw_mins_per_cut: 0, saw_setup_mins: 0,
+  machine_time_mins:  0,
 };
 
 // Saved quote line from the DB (null if this part was never saved) —
@@ -368,6 +380,7 @@ function collect() {
     saw_num_cuts:         iv('saw_num_cuts'),
     saw_mins_per_cut:     fv('saw_mins_per_cut'),
     saw_setup_mins:       fv('saw_setup_mins'),
+    machine_time_mins:    fv('machine_time_mins'),
   };
 }
 
@@ -399,6 +412,7 @@ function initForm() {
   sv('saw_num_cuts',       state.saw_num_cuts);
   sv('saw_mins_per_cut',   state.saw_mins_per_cut);
   sv('saw_setup_mins',     state.saw_setup_mins);
+  sv('machine_time_mins',  state.machine_time_mins);
 
   const active = state.active_processes || [];
   document.querySelectorAll('.proc-btn').forEach(btn => {

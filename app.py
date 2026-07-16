@@ -413,8 +413,9 @@ def _confirm_match_sync(nest_id: int, form: dict):
 
 # ── Assemblies ───────────────────────────────────────────────────────────────
 # Parts can be grouped into assemblies, and assemblies nested inside other
-# assemblies. Cut/fold is priced on the part; weld / fabrication / machining /
-# finishing are priced on the assembly as a whole.
+# assemblies. Cut/fold is priced on the part; weld / fabrication / finishing
+# are priced on the assembly as a whole. Machining can be priced at either
+# level: on the part (per-part time × qty) and/or on the assembly (per build).
 
 def _assembly_tree(assemblies: list[dict]) -> list[dict]:
     """Annotate each assembly with depth and total builds (qty × parent
@@ -851,9 +852,9 @@ def quote_row_to_state(q: dict) -> dict:
     active = []
     if (q.get("num_folds") or 0) > 0:
         active.append("fold")
-    # Weld / machine / assembly are assembly-level processes now — old part
-    # quotes that had them are re-priced with cut/fold only.
-    for proc in ("tube", "saw"):
+    # Weld / assembly are assembly-level processes now — old part quotes that
+    # had them are re-priced without. Machine is valid at both levels.
+    for proc in ("tube", "saw", "machine"):
         if q.get(f"{proc}_active"):
             active.append(proc)
     return {
