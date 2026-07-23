@@ -81,8 +81,9 @@ Assembly guidance:
   ASSY or WELDMENT. A single-part drawing is NOT an assembly.
 - bom: every row of the parts list table if one exists. part_number is the
   drawing/part number column verbatim; qty is the quantity of that component
-  per assembly. Use null for cells that are empty or unreadable. Use an empty
-  list when there is no parts list."""
+  per assembly. Use -1 for item_no or qty when the cell is empty or
+  unreadable, and null for description in that case. Use an empty list when
+  there is no parts list."""
 
 _TITLE_BLOCK_SCHEMA = {
     "type": "object",
@@ -137,10 +138,10 @@ _ASSEMBLY_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "item_no":     {"type": ["integer", "null"]},
+                    "item_no":     {"type": "integer"},
                     "part_number": {"type": "string"},
                     "description": {"type": ["string", "null"]},
-                    "qty":         {"type": ["integer", "null"]},
+                    "qty":         {"type": "integer"},
                 },
                 "required": ["item_no", "part_number", "description", "qty"],
                 "additionalProperties": False,
@@ -253,8 +254,15 @@ def extract_page_with_claude(pdf_path: Path, page_index: int) -> dict:
             k: v for k, v in data["pricing_factors"].items() if v not in ([], None)
         },
     }
+    def _clean_bom_row(row: dict) -> dict:
+        out = {k: v for k, v in row.items() if v is not None}
+        for k in ("item_no", "qty"):
+            if out.get(k) == -1:
+                del out[k]
+        return out
+
     asm = data.get("assembly") or {}
-    bom = [{k: v for k, v in row.items() if v is not None}
+    bom = [_clean_bom_row(row)
            for row in asm.get("bom") or [] if row.get("part_number")]
     if asm.get("is_assembly") or bom:
         result["assembly"] = {"is_assembly": True, "bom": bom}

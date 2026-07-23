@@ -126,6 +126,10 @@
             <input class="price-input" id="sticker_cost" type="number" step="0.01" min="0" placeholder="0.07">
           </div>
           <div class="field-block">
+            <label class="field-label">Rubber Lining / Part</label>
+            <input class="price-input" id="rubber_lining_cost" type="number" step="0.01" min="0" placeholder="0.00">
+          </div>
+          <div class="field-block">
             <label class="field-label">Misc / Part</label>
             <input class="price-input" id="misc_cost" type="number" step="0.01" min="0" placeholder="0.00">
           </div>
@@ -304,6 +308,7 @@ const DEFAULTS = {
   purchased:          0,
   finish_cost:        0,
   sticker_cost:       0.07,
+  rubber_lining_cost: 0,
   misc_cost:          0,
   margin_pct:         10,
   active_processes:   S.bending && S.bendCount > 0 ? ['fold'] : [],
@@ -370,6 +375,7 @@ function collect() {
     purchased:            fv('purchased'),
     finish_cost:          fv('finish_cost'),
     sticker_cost:         fv('sticker_cost'),
+    rubber_lining_cost:   fv('rubber_lining_cost'),
     misc_cost:            fv('misc_cost'),
     margin_pct:           fv('margin_pct'),
     active_processes:     active,
@@ -403,6 +409,7 @@ function initForm() {
   sv('purchased',          state.purchased);
   sv('finish_cost',        state.finish_cost);
   sv('sticker_cost',       state.sticker_cost);
+  sv('rubber_lining_cost', state.rubber_lining_cost);
   sv('misc_cost',          state.misc_cost);
   sv('margin_pct',         state.margin_pct);
   sv('tube_cut_time_mins', state.tube_cut_time_mins);

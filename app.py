@@ -772,9 +772,10 @@ def calculate_price(d: dict, rates: dict) -> dict:
     finish   = f("finish_cost") * rates["finishing_markup"] * qty
     purchase = f("purchased")   * qty
     sticker  = f("sticker_cost",  0.07) * qty
+    rubber   = f("rubber_lining_cost")  * qty
     misc     = f("misc_cost")           * qty
 
-    total      = laser + fold + tube + weld + saw + machine + assembly + finish + purchase + sticker + misc
+    total      = laser + fold + tube + weld + saw + machine + assembly + finish + purchase + sticker + rubber + misc
     margin_pct = f("margin_pct", 10)
 
     return {
@@ -787,7 +788,8 @@ def calculate_price(d: dict, rates: dict) -> dict:
             "saw":   round(saw, 2),   "machine":  round(machine, 2),
             "assembly": round(assembly, 2),
             "finish":   round(finish, 2),  "purchased": round(purchase, 2),
-            "sticker":  round(sticker, 2), "misc":      round(misc, 2),
+            "sticker":  round(sticker, 2), "rubber_lining": round(rubber, 2),
+            "misc":     round(misc, 2),
         },
     }
 
@@ -867,6 +869,7 @@ def quote_row_to_state(q: dict) -> dict:
         "purchased":          q.get("purchased_total"),
         "finish_cost":        q.get("finish_cost_per_part"),
         "sticker_cost":       q.get("sticker_cost"),
+        "rubber_lining_cost": q.get("rubber_lining_cost"),
         "misc_cost":          q.get("misc_cost"),
         "margin_pct":         q.get("margin_pct"),
         "active_processes":   active,
@@ -1094,7 +1097,7 @@ def _price_save_sync(nest_id: int, data):
                 quote_batch_id, nest_part_id, burden_rate_id, material_id,
                 quoted_at, quantity,
                 purchased_total, finish_cost_per_part, sticker_cost,
-                misc_cost, margin_pct,
+                rubber_lining_cost, misc_cost, margin_pct,
                 material_cost_m2, num_folds, mins_per_fold, fold_setup_mins,
                 tube_active, weld_active, saw_active, machine_active, assembly_active,
                 tube_cut_time_mins, tube_kg_per_metre, tube_length_m, tube_cost_per_kg,
@@ -1102,7 +1105,7 @@ def _price_save_sync(nest_id: int, data):
                 machine_time_mins, assembly_time_mins,
                 cost_per_part, line_cost, margin_total, breakdown
             ) VALUES (
-                %s,%s,%s,%s, NOW(),%s, %s,%s,%s,%s,%s,
+                %s,%s,%s,%s, NOW(),%s, %s,%s,%s,%s,%s,%s,
                 %s,%s,%s,%s,
                 %s,%s,%s,%s,%s,
                 %s,%s,%s,%s, %s, %s,%s,%s, %s,%s,
@@ -1117,6 +1120,7 @@ def _price_save_sync(nest_id: int, data):
                 purchased_total      = EXCLUDED.purchased_total,
                 finish_cost_per_part = EXCLUDED.finish_cost_per_part,
                 sticker_cost   = EXCLUDED.sticker_cost,
+                rubber_lining_cost = EXCLUDED.rubber_lining_cost,
                 misc_cost      = EXCLUDED.misc_cost,
                 margin_pct     = EXCLUDED.margin_pct,
                 material_cost_m2 = EXCLUDED.material_cost_m2,
@@ -1147,6 +1151,7 @@ def _price_save_sync(nest_id: int, data):
             qty or 1,
             p.get("purchased", 0), p.get("finish_cost", 0),
             p.get("sticker_cost", 0.07),
+            p.get("rubber_lining_cost", 0),
             p.get("misc_cost", 0),       p.get("margin_pct", 10),
             _opt_num(p.get("material_cost_m2")), _opt_num(p.get("num_folds")),
             _opt_num(p.get("mins_per_fold")),    _opt_num(p.get("fold_setup_mins")),
@@ -1722,7 +1727,7 @@ _JMS_PROCESS_ROWS = [
     ("Welding",     ("weld",)),
     ("Assembly",    ("assembly", "fab")),
     ("Finishing",   ("finish",)),
-    ("Misc",        ("misc", "sticker", "purchased")),
+    ("Misc",        ("misc", "sticker", "rubber_lining", "purchased")),
 ]
 
 _GBP_FMT = '"£"#,##0.00'
@@ -1874,7 +1879,7 @@ def quote_export_xlsx(batch_id: int):
 
     # ── Breakdown sheet — per-part per-process costs ──
     procs = ["laser", "fold", "tube", "weld", "saw", "machine", "assembly",
-             "finish", "purchased", "sticker", "misc"]
+             "finish", "purchased", "sticker", "rubber_lining", "misc"]
     bs = wb.create_sheet("Breakdown")
     bs.append(["Part No", "Material £/m²"] + [p.capitalize() for p in procs] + ["Line Cost"])
     for cell in bs[1]:
